@@ -1,0 +1,31 @@
+---
+main:
+  params: [args]
+  steps:
+    - first:
+        call: sys.log
+        args:
+          data: "hello"
+    - second:
+        assign:
+          - foo: 1
+          - bar: "str"
+          - baz:
+            - 1
+            - 0.5
+            - "str"
+            - args:
+                "${args}"
+          - bar: '${bar + "ing"}'
+          - 'baz[2]':
+              a: "b" 
+    - third:
+        call: sys.log
+        args:
+          data: "${args}"
+    - forth:
+        call: sys.log
+        args:
+          data: '${base64.encode(bar)}'
+    - final:
+        return: '${baz}'
