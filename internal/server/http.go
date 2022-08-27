@@ -134,7 +134,7 @@ func (h *httpHandler) execute(ex *execution, args any) {
 		ex.State = "SUCCEEDED"
 		var s strings.Builder
 		if dumpErr := json.NewEncoder(&s).Encode(ret); dumpErr != nil {
-			log.Printf("failed to enocde workflow result: %v", dumpErr)
+			log.Printf("failed to encode workflow result: %v", dumpErr)
 			log.Printf("result: %v", ret)
 		} else {
 			ex.Result = strings.TrimSuffix(s.String(), "\n")
@@ -150,10 +150,10 @@ func (h *httpHandler) execute(ex *execution, args any) {
 	if errors.As(err, &exception) {
 		var s strings.Builder
 		if dumpErr := json.NewEncoder(&s).Encode(exception); dumpErr != nil {
-			log.Printf("failed to enocde workflow exception: %v", dumpErr)
+			log.Printf("failed to encode workflow exception: %v", dumpErr)
 			s.Reset()
 			if dumpErr = json.NewEncoder(&s).Encode(err); dumpErr != nil {
-				log.Printf("failed to enocde workflow error: %v", dumpErr)
+				log.Printf("failed to encode workflow error: %v", dumpErr)
 				ex.Error = fmt.Sprint(err)
 			} else {
 				ex.Error = strings.TrimSuffix(s.String(), "\n")
@@ -165,7 +165,7 @@ func (h *httpHandler) execute(ex *execution, args any) {
 		log.Printf("failed to execute workflow: %v", err)
 		var s strings.Builder
 		if dumpErr := json.NewEncoder(&s).Encode(err); dumpErr != nil {
-			log.Printf("failed to enocde workflow error: %v", dumpErr)
+			log.Printf("failed to encode workflow error: %v", dumpErr)
 			ex.Error = fmt.Sprint(err)
 		} else {
 			ex.Error = strings.TrimSuffix(s.String(), "\n")

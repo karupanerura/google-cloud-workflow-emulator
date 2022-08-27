@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/goccy/go-json"
 	"github.com/samber/lo"
 )
 
@@ -48,7 +49,11 @@ func NewExceptionByString(s string) Exception {
 type mapException map[string]any
 
 func (m mapException) Error() string {
-	return fmt.Sprintf("custom map exception: %+v", m.Exception())
+	b, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Sprintf("custom map exception: %+v", m.Exception())
+	}
+	return fmt.Sprintf("custom map exception: %s", string(b))
 }
 
 func (m mapException) Exception() any {
@@ -92,7 +97,8 @@ func (e *Error) Exception() any {
 	}
 
 	o := map[string]any{
-		"tags": tags,
+		"tags":    tags,
+		"message": e.Error(),
 	}
 	if len(e.Extra) != 0 {
 		o = lo.Assign(o, e.Extra)

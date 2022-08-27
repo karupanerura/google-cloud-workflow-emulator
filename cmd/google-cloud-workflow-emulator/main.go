@@ -74,8 +74,11 @@ func run(args []string) int {
 	if err != nil {
 		var exception types.Exception
 		if errors.As(err, &exception) {
-			if err = dumpJSON(os.Stderr, exception); err != nil {
+			if _, err = fmt.Fprintln(os.Stderr, exception.Error()); err != nil {
 				log.Printf("failed to dump workflow error: %v", err)
+			}
+			if err = dumpJSON(os.Stderr, exception.Exception()); err != nil {
+				log.Printf("failed to dump workflow error as JSON: %v", err)
 			}
 			return 1
 		} else {
@@ -138,8 +141,8 @@ func serveWorkflow(listen string, loader func() (workflow.WorkflowRoot, error)) 
 
 func dumpJSON(w io.Writer, v any) error {
 	opts := []json.EncodeOptionFunc{json.DisableHTMLEscape()}
-	if fder, ok := w.(interface{ Fd() uintptr }); ok {
-		if isatty.IsTerminal(fder.Fd()) {
+	if f, ok := w.(interface{ Fd() uintptr }); ok {
+		if isatty.IsTerminal(f.Fd()) {
 			opts = append(opts, json.Colorize(json.DefaultColorScheme))
 		}
 	}

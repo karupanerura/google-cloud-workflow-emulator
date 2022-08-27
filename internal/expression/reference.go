@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/k0kubun/pp"
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 )
 
@@ -15,19 +14,25 @@ type Reference interface {
 }
 
 type Value interface {
+	Paths() (string, []any)
 	Path() string
 	Get() any
 }
 
 type pureValue struct {
-	path string
-	body any
+	getPaths func() (string, []any)
+	getPath  func() string
+	body     any
 }
 
 var _ Value = (*pureValue)(nil)
 
+func (v *pureValue) Paths() (string, []any) {
+	return v.getPaths()
+}
+
 func (v *pureValue) Path() string {
-	return v.path
+	return v.getPath()
 }
 
 func (v *pureValue) Get() any {
@@ -40,15 +45,20 @@ type Variable interface {
 }
 
 type pureVariable struct {
-	path   string
-	getter func() any
-	setter func(any)
+	getPaths func() (string, []any)
+	getPath  func() string
+	getter   func() any
+	setter   func(any)
 }
 
 var _ Variable = (*pureVariable)(nil)
 
+func (v *pureVariable) Paths() (string, []any) {
+	return v.getPaths()
+}
+
 func (v *pureVariable) Path() string {
-	return v.path
+	return v.getPath()
 }
 
 func (v *pureVariable) Get() any {
@@ -64,8 +74,32 @@ type symbolReference struct {
 }
 
 func (r *symbolReference) ResolveVariable(st types.SymbolTable) (Variable, error) {
+	if v, shared := st[r.name].(*types.SharedVariable); shared {
+		return &pureVariable{
+			getPath: func() string {
+				return r.name
+			},
+			getPaths: func() (string, []any) {
+				return r.name, nil
+			},
+			getter: func() any {
+				v.RLock()
+				defer v.RUnlock()
+				return v.Value
+			},
+			setter: func(value any) {
+				st[r.name] = value
+			},
+		}, nil
+	}
+
 	return &pureVariable{
-		path: r.name,
+		getPath: func() string {
+			return r.name
+		},
+		getPaths: func() (string, []any) {
+			return r.name, nil
+		},
 		getter: func() any {
 			return st[r.name]
 		},
@@ -89,7 +123,12 @@ func (r *symbolReference) ResolveValue(st types.SymbolTable) (Value, error) {
 	}
 
 	return &pureValue{
-		path: v.Path(),
+		getPath: func() string {
+			return r.name
+		},
+		getPaths: func() (string, []any) {
+			return r.name, nil
+		},
 		body: v.Get(),
 	}, nil
 }
@@ -120,9 +159,9 @@ func (r *fieldReference) ResolveVariable(st types.SymbolTable) (Variable, error)
 		return nil, err
 	}
 
-	path := r.resolvePath(contextRef)
 	context, ok := contextRef.Get().(map[string]any)
 	if !ok {
+		path := r.resolvePath(contextRef)
 		return nil, &types.Error{
 			Tag: types.TypeErrorTag,
 			Err: fmt.Errorf("%s: unexpected context type %T at %s", path, contextRef.Get(), contextRef.Path()),
@@ -130,12 +169,17 @@ func (r *fieldReference) ResolveVariable(st types.SymbolTable) (Variable, error)
 	}
 
 	return &pureVariable{
-		path: path,
+		getPath: func() string {
+			return r.resolvePath(contextRef)
+		},
+		getPaths: func() (string, []any) {
+			root, paths := contextRef.Paths()
+			return root, append(paths, r.name)
+		},
 		getter: func() any {
 			return context[r.name]
 		},
 		setter: func(value any) {
-			pp.Println("SET ", value)
 			context[r.name] = value
 		},
 	}, nil
@@ -147,23 +191,44 @@ func (r *fieldReference) ResolveValue(st types.SymbolTable) (Value, error) {
 		return nil, err
 	}
 
-	path := r.resolvePath(contextRef)
 	context, ok := contextRef.Get().(map[string]any)
 	if !ok {
+		path := r.resolvePath(contextRef)
 		return nil, &types.Error{
 			Tag: types.TypeErrorTag,
 			Err: fmt.Errorf("%s: unexpected context type %T at %s", path, contextRef.Get(), contextRef.Path()),
 		}
 	}
 	if _, ok = context[r.name]; !ok {
+		path := r.resolvePath(contextRef)
 		return nil, &types.Error{
 			Tag: types.KeyErrorTag,
 			Err: fmt.Errorf("%s: not found", path),
 		}
 	}
 
+	if v, shared := context[r.name].(*types.SharedVariable); shared {
+		v.RLock()
+		defer v.RUnlock()
+		return &pureValue{
+			getPath: func() string {
+				return r.resolvePath(contextRef)
+			},
+			getPaths: func() (string, []any) {
+				root, paths := contextRef.Paths()
+				return root, append(paths, r.name)
+			},
+			body: v.Value,
+		}, nil
+	}
 	return &pureValue{
-		path: path,
+		getPath: func() string {
+			return r.resolvePath(contextRef)
+		},
+		getPaths: func() (string, []any) {
+			root, paths := contextRef.Paths()
+			return root, append(paths, r.name)
+		},
 		body: context[r.name],
 	}, nil
 }
@@ -188,15 +253,16 @@ func (r *indexReference) ResolveVariable(st types.SymbolTable) (Variable, error)
 		return nil, err
 	}
 
-	path := r.resolvePath(contextRef)
 	context, ok := contextRef.Get().([]any)
 	if !ok {
+		path := r.resolvePath(contextRef)
 		return nil, &types.Error{
 			Tag: types.TypeErrorTag,
 			Err: fmt.Errorf("%s: unexpected context type %T at %s", path, contextRef.Get(), contextRef.Path()),
 		}
 	}
 	if r.index >= int64(len(context)) {
+		path := r.resolvePath(contextRef)
 		return nil, &types.Error{
 			Tag: types.IndexErrorTag,
 			Err: fmt.Errorf("%s: array index %d out of bounds", path, r.index),
@@ -204,7 +270,13 @@ func (r *indexReference) ResolveVariable(st types.SymbolTable) (Variable, error)
 	}
 
 	return &pureVariable{
-		path: path,
+		getPath: func() string {
+			return r.resolvePath(contextRef)
+		},
+		getPaths: func() (string, []any) {
+			root, paths := contextRef.Paths()
+			return root, append(paths, r.index)
+		},
 		getter: func() any {
 			return context[r.index]
 		},
@@ -221,7 +293,8 @@ func (r *indexReference) ResolveValue(st types.SymbolTable) (Value, error) {
 	}
 
 	return &pureValue{
-		path: v.Path(),
-		body: v.Get(),
+		getPath:  v.(*pureVariable).getPath,
+		getPaths: v.(*pureVariable).getPaths,
+		body:     v.Get(),
 	}, nil
 }

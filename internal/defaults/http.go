@@ -41,130 +41,121 @@ var sharedHTTPClient = httpClient{
 	oauth2TokenSourceCache: map[string]oauth2.TokenSource{},
 }
 
-var HTTP = map[string]any{
-	"default_retry": map[string]any{
-		"predicate":   "${http.default_retry_predicate}",
-		"max_retries": int64(5),
-		"backoff": map[string]any{
-			"initial_delay": float64(1),
-			"max_delay":     float64(60),
-			"multiplier":    float64(2),
+var HTTP = mergeMaps(
+	aggregateFunctionsToMap("http", []types.Function{
+		types.MustNewFunction("http.request", []types.Argument{
+			{Name: "method"},
+			{Name: "url"},
+			{Name: "timeout", Default: float64(300)},
+			{Name: "body", Optional: true},
+			{Name: "headers", Optional: true},
+			{Name: "query", Optional: true},
+			{Name: "auth", Optional: true},
+		}, func(method, rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
+			return sharedHTTPClient.request(method, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
+		}),
+		types.MustNewFunction("http.get", []types.Argument{
+			{Name: "url"},
+			{Name: "timeout", Default: float64(300)},
+			{Name: "headers", Optional: true},
+			{Name: "query", Optional: true},
+			{Name: "auth", Optional: true},
+		}, func(rawURL string, timeout float64, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
+			return sharedHTTPClient.request(http.MethodGet, rawURL, timeout, nil, rawHeaders, rawQuery, auth)
+		}),
+		types.MustNewFunction("http.post", []types.Argument{
+			{Name: "url"},
+			{Name: "timeout", Default: float64(300)},
+			{Name: "body", Optional: true},
+			{Name: "headers", Optional: true},
+			{Name: "query", Optional: true},
+			{Name: "auth", Optional: true},
+		}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
+			return sharedHTTPClient.request(http.MethodPost, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
+		}),
+		types.MustNewFunction("http.put", []types.Argument{
+			{Name: "url"},
+			{Name: "timeout", Default: float64(300)},
+			{Name: "body", Optional: true},
+			{Name: "headers", Optional: true},
+			{Name: "query", Optional: true},
+			{Name: "auth", Optional: true},
+		}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
+			return sharedHTTPClient.request(http.MethodPut, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
+		}),
+		types.MustNewFunction("http.patch", []types.Argument{
+			{Name: "url"},
+			{Name: "timeout", Default: float64(300)},
+			{Name: "body", Optional: true},
+			{Name: "headers", Optional: true},
+			{Name: "query", Optional: true},
+			{Name: "auth", Optional: true},
+		}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
+			return sharedHTTPClient.request(http.MethodPatch, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
+		}),
+		types.MustNewFunction("http.delete", []types.Argument{
+			{Name: "url"},
+			{Name: "timeout", Default: float64(300)},
+			{Name: "body", Optional: true},
+			{Name: "headers", Optional: true},
+			{Name: "query", Optional: true},
+			{Name: "auth", Optional: true},
+		}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
+			return sharedHTTPClient.request(http.MethodDelete, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
+		}),
+		types.MustNewFunction("http.default_retry_predicate", []types.Argument{
+			{Name: "exception"},
+		}, func(exception map[string]any) (bool, error) {
+			codeAny, ok := exception["code"]
+			if !ok {
+				return false, nil
+			}
+
+			code, ok := codeAny.(int64)
+			if !ok {
+				return false, nil
+			}
+
+			switch code {
+			case 429, 502, 503, 504:
+				return true, nil
+			default:
+				return false, nil
+			}
+		}),
+		types.MustNewFunction("http.default_retry_predicate_non_idempotent", []types.Argument{
+			{Name: "exception"},
+		}, func(exception map[string]any) (bool, error) {
+			codeAny, ok := exception["code"]
+			if !ok {
+				return false, nil
+			}
+
+			code, ok := codeAny.(int64)
+			if !ok {
+				return false, nil
+			}
+
+			switch code {
+			case 429, 503:
+				return true, nil
+			default:
+				return false, nil
+			}
+		}),
+	}),
+	map[string]any{
+		"default_retry": map[string]any{
+			"predicate":   "${http.default_retry_predicate}",
+			"max_retries": int64(5),
+			"backoff":     Retry["default_backoff"],
+		},
+		"default_retry_non_idempotent": map[string]any{
+			"predicate":   "${http.default_retry_predicate_non_idempotent}",
+			"max_retries": int64(5),
+			"backoff":     Retry["default_backoff"],
 		},
 	},
-	"default_retry_predicate": defaultHTTPRetryPredecate,
-	"default_retry_non_idempotent ": map[string]any{
-		"predicate":   "${http.default_retry_predicate_non_idempotent}",
-		"max_retries": int64(5),
-		"backoff": map[string]any{
-			"initial_delay": float64(1),
-			"max_delay":     float64(60),
-			"multiplier":    float64(2),
-		},
-	},
-	"default_retry_predicate_non_idempotent": defaultHTTPRetryNonIdempotentPredecate,
-	"request": types.MustNewFunction("http.request", []types.Argument{
-		{Name: "method"},
-		{Name: "url"},
-		{Name: "timeout", Default: float64(300)},
-		{Name: "body", Optional: true},
-		{Name: "headers", Optional: true},
-		{Name: "query", Optional: true},
-		{Name: "auth", Optional: true},
-	}, func(method, rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
-		return sharedHTTPClient.request(method, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
-	}),
-	"get": types.MustNewFunction("http.get", []types.Argument{
-		{Name: "url"},
-		{Name: "timeout", Default: float64(300)},
-		{Name: "headers", Optional: true},
-		{Name: "query", Optional: true},
-		{Name: "auth", Optional: true},
-	}, func(rawURL string, timeout float64, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
-		return sharedHTTPClient.request(http.MethodGet, rawURL, timeout, nil, rawHeaders, rawQuery, auth)
-	}),
-	"post": types.MustNewFunction("http.post", []types.Argument{
-		{Name: "url"},
-		{Name: "timeout", Default: float64(300)},
-		{Name: "body", Optional: true},
-		{Name: "headers", Optional: true},
-		{Name: "query", Optional: true},
-		{Name: "auth", Optional: true},
-	}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
-		return sharedHTTPClient.request(http.MethodPost, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
-	}),
-	"put": types.MustNewFunction("http.put", []types.Argument{
-		{Name: "url"},
-		{Name: "timeout", Default: float64(300)},
-		{Name: "body", Optional: true},
-		{Name: "headers", Optional: true},
-		{Name: "query", Optional: true},
-		{Name: "auth", Optional: true},
-	}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
-		return sharedHTTPClient.request(http.MethodPut, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
-	}),
-	"patch": types.MustNewFunction("http.patch", []types.Argument{
-		{Name: "url"},
-		{Name: "timeout", Default: float64(300)},
-		{Name: "body", Optional: true},
-		{Name: "headers", Optional: true},
-		{Name: "query", Optional: true},
-		{Name: "auth", Optional: true},
-	}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
-		return sharedHTTPClient.request(http.MethodPatch, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
-	}),
-	"delete": types.MustNewFunction("http.delete", []types.Argument{
-		{Name: "url"},
-		{Name: "timeout", Default: float64(300)},
-		{Name: "body", Optional: true},
-		{Name: "headers", Optional: true},
-		{Name: "query", Optional: true},
-		{Name: "auth", Optional: true},
-	}, func(rawURL string, timeout float64, rawBody any, rawHeaders, rawQuery, auth map[string]any) (map[string]any, error) {
-		return sharedHTTPClient.request(http.MethodDelete, rawURL, timeout, rawBody, rawHeaders, rawQuery, auth)
-	}),
-}
-
-var (
-	defaultHTTPRetryPredecate = types.MustNewFunction("http.request", []types.Argument{
-		{Name: "exception"},
-	}, func(exception map[string]any) (bool, error) {
-		codeAny, ok := exception["code"]
-		if !ok {
-			return false, nil
-		}
-
-		code, ok := codeAny.(int64)
-		if !ok {
-			return false, nil
-		}
-
-		switch code {
-		case 429, 502, 503, 504:
-			return true, nil
-		default:
-			return false, nil
-		}
-	})
-	defaultHTTPRetryNonIdempotentPredecate = types.MustNewFunction("http.request", []types.Argument{
-		{Name: "exception"},
-	}, func(exception map[string]any) (bool, error) {
-		codeAny, ok := exception["code"]
-		if !ok {
-			return false, nil
-		}
-
-		code, ok := codeAny.(int64)
-		if !ok {
-			return false, nil
-		}
-
-		switch code {
-		case 429, 503:
-			return true, nil
-		default:
-			return false, nil
-		}
-	})
 )
 
 type httpClient struct {

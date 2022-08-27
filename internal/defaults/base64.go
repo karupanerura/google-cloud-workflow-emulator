@@ -6,8 +6,8 @@ import (
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 )
 
-var Base64 = map[string]any{
-	"encode": types.MustNewFunction("base64.encode", []types.Argument{
+var Base64 = aggregateFunctionsToMap("base64", []types.Function{
+	types.MustNewFunction("base64.encode", []types.Argument{
 		{Name: "data"},
 		{Name: "padding", Default: true},
 	}, func(data string, padding bool) (string, error) {
@@ -17,7 +17,7 @@ var Base64 = map[string]any{
 		}
 		return encoder.EncodeToString([]byte(data)), nil
 	}),
-	"decode": types.MustNewFunction("base64.decode", []types.Argument{
+	types.MustNewFunction("base64.decode", []types.Argument{
 		{Name: "data"},
 		{Name: "padding", Default: true},
 	}, func(data string, padding bool) (string, error) {
@@ -37,4 +37,4 @@ var Base64 = map[string]any{
 
 		return string(b), nil
 	}),
-}
+})

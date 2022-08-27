@@ -18,7 +18,7 @@ main:
                 "${args}"
           - bar: '${bar + "ing"}'
           - 'baz[2]':
-              a: "b" 
+              a: "b"
     - third:
         call: sys.log
         args:
@@ -26,6 +26,6 @@ main:
     - forth:
         call: sys.log
         args:
-          data: '${base64.encode(bar)}'
+          data: '${base64.encode(bar, false)}'
     - final:
-        return: '${baz}'
+        raise: '${baz[3]}'

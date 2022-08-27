@@ -3,31 +3,28 @@ package workflow
 import (
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/k0kubun/pp"
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/defaults"
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/expression"
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 	"github.com/mitchellh/mapstructure"
 	"github.com/samber/lo"
+	"golang.org/x/sync/errgroup"
 )
 
 type WorkflowRoot map[string]*Workflow
 
 func (r WorkflowRoot) Execute(args any) (any, error) {
-	log.Printf("[DEBUG] execute from root")
-
-	mainWorflow, ok := r["main"]
+	mainWorkflow, ok := r["main"]
 	if !ok {
 		return nil, fmt.Errorf("main workflow is not defined")
 	}
 
 	argsSymbolTable := types.SymbolTable{}
-	if len(mainWorflow.Params) == 1 {
-		argsSymbolTable[mainWorflow.Params[0].Name] = args
+	if len(mainWorkflow.Params) == 1 {
+		argsSymbolTable[mainWorkflow.Params[0].Name] = args
 	}
 
 	st := types.SymbolTable{}
@@ -39,7 +36,6 @@ func (r WorkflowRoot) Execute(args any) (any, error) {
 		name := name
 		workflow := workflow
 		st[name] = types.NewRawFunction(name, workflow.Params, func(args []any) (any, error) {
-			log.Printf("[DEBUG] workflow %s", name)
 			st := st.Inherit(defaults.DefaultSymbolTable)
 			for i, param := range workflow.Params {
 				st[param.Name] = args[i]
@@ -48,7 +44,7 @@ func (r WorkflowRoot) Execute(args any) (any, error) {
 		})
 	}
 
-	return mainWorflow.Execute(argsSymbolTable.Inherit(st.Inherit(defaults.DefaultSymbolTable)))
+	return mainWorkflow.Execute(argsSymbolTable.Inherit(st.Inherit(defaults.DefaultSymbolTable)))
 }
 
 type Workflow struct {
@@ -60,7 +56,6 @@ type Workflow struct {
 }
 
 func (w *Workflow) Execute(symbolTable types.SymbolTable) (ret any, err error) {
-	log.Printf("[DEBUG] workflow %s", w.Name)
 	for _, param := range w.Params {
 		if _, ok := symbolTable[param.Name]; ok {
 			continue
@@ -77,8 +72,6 @@ func (w *Workflow) Execute(symbolTable types.SymbolTable) (ret any, err error) {
 	ev := expression.Evaluator{SymbolTable: symbolTable.Inherit(defaults.DefaultSymbolTable)}
 	step := w.entryStep
 	for step != nil {
-		log.Printf("[DEBUG] step %s", step.Name())
-
 		var nextStepName StepName
 		ret, nextStepName, err = step.Execute(&ev)
 		if err != nil {
@@ -111,10 +104,30 @@ type Step interface {
 	AnonymousStep
 }
 
+type namedStep struct {
+	name StepName
+	step AnonymousStep
+	next StepName
+}
+
+func (s *namedStep) Name() StepName {
+	return s.name
+}
+
+func (s *namedStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
+	ret, nextStep, err := s.step.Execute(ev)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if nextStep == "" {
+		nextStep = s.next
+	}
+	return ret, nextStep, nil
+}
+
 type assignStep struct {
-	name         StepName
-	assigns      []assignOperation
-	nextStepName StepName
+	assigns []assignOperation
 }
 
 type assignOperation struct {
@@ -122,7 +135,7 @@ type assignOperation struct {
 	right any
 }
 
-func newAssignStep(stepName StepName, def anonymousStepDef, defaultNextStepName StepName) (*assignStep, error) {
+func newAssignStep(def anonymousStepDef) (*assignStep, error) {
 	var assignDef []map[string]any
 	err := unmarshalJSONUseNumber(def["assign"], &assignDef)
 	if err != nil {
@@ -156,44 +169,53 @@ func newAssignStep(stepName StepName, def anonymousStepDef, defaultNextStepName 
 	}
 
 	return &assignStep{
-		name:         stepName,
-		assigns:      assigns,
-		nextStepName: defaultNextStepName,
+		assigns: assigns,
 	}, nil
 }
 
-func (s *assignStep) Name() StepName {
-	return s.name
-}
-
 func (s *assignStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
+	inheritedVariables, _ := ev.SymbolTable[types.InternalInheritedVariablesSymbol].(*types.InternalInheritedVariables)
+	if inheritedVariables != nil {
+		exprs := lo.Map(s.assigns, func(assign assignOperation, _ int) *expression.Expr {
+			return assign.left
+		})
+		unlock, err := ev.LockSharedVariablesIfNeeded(exprs...)
+		if err != nil {
+			return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
+		}
+		defer unlock()
+	}
+
 	for i, assign := range s.assigns {
 		ref, err := ev.ResolveReference(assign.left)
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid assign[%d]: %w", i, err)
 		}
-
 		variable, err := ref.ResolveVariable(ev.SymbolTable)
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid assign[%d]: %w", i, err)
+		}
+		if inheritedVariables != nil {
+			rootSym, _ := variable.Paths()
+			if _, inherited := inheritedVariables.Shared[rootSym]; inherited {
+				return nil, "", fmt.Errorf("invalid assign[%d]: cannot assign to non-shared variable in parallel step", i)
+			}
 		}
 
 		value, err := ev.EvaluateValueRecursive(assign.right)
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid assign[%d]: %w", i, err)
 		}
-
 		variable.Set(value)
 	}
-	return nil, s.nextStepName, nil
+	return nil, "", nil
 }
 
 type returnStep struct {
-	name        StepName
 	returnValue any
 }
 
-func newReturnStep(stepName StepName, def anonymousStepDef) (*returnStep, error) {
+func newReturnStep(def anonymousStepDef) (*returnStep, error) {
 	var returnDef any
 	err := json.Unmarshal(def["return"], &returnDef)
 	if err != nil {
@@ -206,13 +228,8 @@ func newReturnStep(stepName StepName, def anonymousStepDef) (*returnStep, error)
 	}
 
 	return &returnStep{
-		name:        stepName,
 		returnValue: returnValue,
 	}, nil
-}
-
-func (s *returnStep) Name() StepName {
-	return s.name
 }
 
 func (s *returnStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
@@ -224,38 +241,11 @@ func (s *returnStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 	return ret, "end", nil
 }
 
-type nextStep struct {
-	name StepName
-	next StepName
-}
-
-func newNextStep(stepName StepName, def anonymousStepDef) (*nextStep, error) {
-	var next StepName
-	err := json.Unmarshal(def["next"], &next)
-	if err != nil {
-		return nil, fmt.Errorf("invalid next: %w", err)
-	}
-
-	return &nextStep{
-		name: stepName,
-		next: next,
-	}, nil
-}
-
-func (s *nextStep) Name() StepName {
-	return s.name
-}
-
-func (s *nextStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
-	return nil, s.next, nil
-}
-
 type raiseStep struct {
-	name       StepName
 	raiseValue any
 }
 
-func newRaiseStep(stepName StepName, def anonymousStepDef) (*raiseStep, error) {
+func newRaiseStep(def anonymousStepDef) (*raiseStep, error) {
 	var raiseValue any
 	err := json.Unmarshal(def["raise"], &raiseValue)
 	if err != nil {
@@ -280,13 +270,8 @@ func newRaiseStep(stepName StepName, def anonymousStepDef) (*raiseStep, error) {
 	}
 
 	return &raiseStep{
-		name:       stepName,
 		raiseValue: raiseValue,
 	}, nil
-}
-
-func (s *raiseStep) Name() StepName {
-	return s.name
 }
 
 func (s *raiseStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
@@ -321,13 +306,11 @@ func (s *raiseStep) raise(ev *expression.Evaluator, value any) (any, StepName, e
 	}
 }
 
-type stepsStep struct {
-	name         StepName
-	steps        []AnonymousStep
-	nextStepName StepName
+type anonymousStepsStep struct {
+	steps []AnonymousStep
 }
 
-func newStepsStep(stepName StepName, def anonymousStepDef, defaultNextStepName StepName) (*stepsStep, error) {
+func newAnonymousStepsStep(def anonymousStepDef) (*anonymousStepsStep, error) {
 	var stepsDef []anonymousStepDef
 	err := json.Unmarshal(def["steps"], stepsDef)
 	if err != nil {
@@ -336,32 +319,18 @@ func newStepsStep(stepName StepName, def anonymousStepDef, defaultNextStepName S
 
 	steps := make([]AnonymousStep, len(stepsDef))
 	for i, stepDef := range stepsDef {
-		steps[i], err = stepDef.compile("", "")
+		steps[i], err = stepDef.compile()
 		if err != nil {
 			return nil, fmt.Errorf("invalid steps[%d]: %w", i, err)
 		}
 	}
 
-	nextStepName := defaultNextStepName
-	if nextJSON, ok := def["next"]; ok {
-		err = json.Unmarshal(nextJSON, &nextStepName)
-		if err != nil {
-			return nil, fmt.Errorf("invalid next %q", string(nextJSON))
-		}
-	}
-
-	return &stepsStep{
-		name:         stepName,
-		steps:        steps,
-		nextStepName: nextStepName,
+	return &anonymousStepsStep{
+		steps: steps,
 	}, nil
 }
 
-func (s *stepsStep) Name() StepName {
-	return s.name
-}
-
-func (s *stepsStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
+func (s *anonymousStepsStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 	for i, step := range s.steps {
 		ret, nextStep, err := step.Execute(ev)
 		if err != nil {
@@ -371,18 +340,16 @@ func (s *stepsStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 			return ret, nextStep, nil
 		}
 	}
-	return nil, s.nextStepName, nil
+	return nil, "", nil
 }
 
 type callStep struct {
-	name         StepName
-	call         *expression.Expr
-	args         any
-	result       *expression.Expr
-	nextStepName StepName
+	call   *expression.Expr
+	args   any
+	result *expression.Expr
 }
 
-func newCallStep(stepName StepName, def anonymousStepDef, defaultNextStepName StepName) (*callStep, error) {
+func newCallStep(def anonymousStepDef) (*callStep, error) {
 	var call string
 	err := json.Unmarshal(def["call"], &call)
 	if err != nil {
@@ -435,28 +402,24 @@ func newCallStep(stepName StepName, def anonymousStepDef, defaultNextStepName St
 		}
 	}
 
-	nextStepName := defaultNextStepName
-	if nextJSON, ok := def["next"]; ok {
-		err = json.Unmarshal(nextJSON, &nextStepName)
-		if err != nil {
-			return nil, fmt.Errorf("invalid next %q", string(nextJSON))
-		}
-	}
-
 	return &callStep{
-		name:         stepName,
-		call:         callExpr,
-		args:         args,
-		result:       resultExpr,
-		nextStepName: nextStepName,
+		call:   callExpr,
+		args:   args,
+		result: resultExpr,
 	}, nil
 }
 
-func (s *callStep) Name() StepName {
-	return s.name
-}
-
 func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
+	if _, ok := ev.SymbolTable[types.InternalInheritedVariablesSymbol].(*types.InternalInheritedVariables); ok {
+		if s.result != nil {
+			unlock, err := ev.LockSharedVariablesIfNeeded(s.result)
+			if err != nil {
+				return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
+			}
+			defer unlock()
+		}
+	}
+
 	callRef, err := ev.ResolveReference(s.call)
 	if err != nil {
 		return nil, "", fmt.Errorf("unknown call %q: %w", s.call.Source, err)
@@ -468,7 +431,7 @@ func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 	}
 	f, ok := callRaw.Get().(types.Function)
 	if !ok {
-		return nil, "", fmt.Errorf("not a callbale function: %s", s.call.Source)
+		return nil, "", fmt.Errorf("not a callable function: %s", s.call.Source)
 	}
 
 	argsRaw, err := ev.EvaluateValueRecursive(s.args)
@@ -482,7 +445,11 @@ func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 		args = v
 	case map[string]any:
 		args = lo.Map(f.Args(), func(key string, _ int) any {
-			return v[key]
+			value, ok := v[key]
+			if ok {
+				return value
+			}
+			return types.SubstitutionNone
 		})
 	default:
 		panic(fmt.Sprintf("invalid args value: %T %+v", v, v))
@@ -501,7 +468,6 @@ func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 		}
 	}
 
-	log.Printf("[DEBUG] call %s %+v", s.call.Source, argsRaw)
 	ret, err := f.Call(args)
 	if err != nil {
 		return nil, "", fmt.Errorf("call %q: %w", s.call.Source, err)
@@ -510,14 +476,12 @@ func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 		variable.Set(ret)
 	}
 
-	return ret, s.nextStepName, nil
+	return ret, "", nil
 }
 
 type switchStep struct {
-	name                StepName
-	conditions          []switchCondition
-	defaultStep         AnonymousStep
-	defaultNextStepName StepName
+	conditions  []switchCondition
+	defaultStep AnonymousStep
 }
 
 type switchCondition struct {
@@ -525,7 +489,7 @@ type switchCondition struct {
 	step      AnonymousStep
 }
 
-func newSwitchStep(stepName StepName, def anonymousStepDef, defaultNextStepName StepName) (*switchStep, error) {
+func newSwitchStep(def anonymousStepDef) (*switchStep, error) {
 	var switchStepDefs []anonymousStepDef
 	if err := json.Unmarshal(def["switch"], &switchStepDefs); err != nil {
 		return nil, fmt.Errorf("invalid switch: %w", err)
@@ -538,7 +502,7 @@ func newSwitchStep(stepName StepName, def anonymousStepDef, defaultNextStepName 
 		delete(switchStepDef, "condition")
 
 		var err error
-		conditions[i].step, err = switchStepDef.compile("", "")
+		conditions[i].step, err = switchStepDef.compile()
 		if err != nil {
 			return nil, fmt.Errorf("invalid switch[%d]: %w", i, err)
 		}
@@ -565,15 +529,9 @@ func newSwitchStep(stepName StepName, def anonymousStepDef, defaultNextStepName 
 	}
 
 	return &switchStep{
-		name:                stepName,
-		conditions:          conditions,
-		defaultStep:         defaultStep,
-		defaultNextStepName: defaultNextStepName,
+		conditions:  conditions,
+		defaultStep: defaultStep,
 	}, nil
-}
-
-func (s *switchStep) Name() StepName {
-	return s.name
 }
 
 func (s *switchStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
@@ -589,9 +547,6 @@ func (s *switchStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 				return nil, "", err
 			}
 
-			if nextStepName == "" {
-				nextStepName = s.defaultNextStepName
-			}
 			return ret, nextStepName, nil
 		}
 	}
@@ -602,21 +557,16 @@ func (s *switchStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 			return nil, "", err
 		}
 
-		if nextStepName == "" {
-			nextStepName = s.defaultNextStepName
-		}
 		return ret, nextStepName, nil
 	}
 
-	return nil, s.defaultNextStepName, nil
+	return nil, "", nil
 }
 
 type tryStep struct {
-	name                StepName
-	realStep            AnonymousStep
-	retryPolicy         *expression.Expr
-	exceptStep          *exceptStep
-	defaultNextStepName StepName
+	realStep    AnonymousStep
+	retryPolicy *expression.Expr
+	exceptStep  *exceptStep
 }
 
 type retryPolicyDef struct {
@@ -627,7 +577,7 @@ type retryPolicyDef struct {
 
 func (p *retryPolicyDef) compile() (*retryPolicy, error) {
 	if p.Predicate == "" {
-		return nil, fmt.Errorf("predecate: required")
+		return nil, fmt.Errorf("predicate: required")
 	}
 
 	policy := &retryPolicy{
@@ -635,17 +585,17 @@ func (p *retryPolicyDef) compile() (*retryPolicy, error) {
 		backoff:    p.Backoff.compile(),
 	}
 	if expr := expression.TrimExprParen(p.Predicate); expr != p.Predicate {
-		predecate, err := expression.ParseExpr(expr)
+		predicate, err := expression.ParseExpr(expr)
 		if err != nil {
-			return nil, fmt.Errorf("predecate: %w", err)
+			return nil, fmt.Errorf("predicate: %w", err)
 		}
-		if !predecate.CanReference() {
-			return nil, fmt.Errorf("predecate: cannot reference to %q", expr)
+		if !predicate.CanReference() {
+			return nil, fmt.Errorf("predicate: cannot reference to %q", expr)
 		}
 
-		policy.predicate = predecate
+		policy.predicate = predicate
 	} else {
-		return nil, fmt.Errorf("predecate: not a expression")
+		return nil, fmt.Errorf("predicate: not a expression")
 	}
 
 	// set default for retry policy
@@ -665,7 +615,7 @@ func (p *retryPolicyDef) compile() (*retryPolicy, error) {
 type retryBackoffPolicyDef struct {
 	InitialDelay float64 `json:"initial_delay" mapstructure:"initial_delay"`
 	MaxDelay     float64 `json:"max_delay" mapstructure:"max_delay"`
-	Multiplier   float64 `json:"max_dmultiplierelay" mapstructure:"max_dmultiplierelay"`
+	Multiplier   float64 `json:"multiplier" mapstructure:"multiplier"`
 }
 
 func (p *retryBackoffPolicyDef) compile() *retryBackoffPolicy {
@@ -692,7 +642,7 @@ type retryBackoffPolicy struct {
 	multiplier   float64
 }
 
-func newTryStep(stepName StepName, def anonymousStepDef, defaultNextStepName StepName) (*tryStep, error) {
+func newTryStep(def anonymousStepDef) (*tryStep, error) {
 	var realStep AnonymousStep
 	{
 		var tryStepDef anonymousStepDef
@@ -701,7 +651,7 @@ func newTryStep(stepName StepName, def anonymousStepDef, defaultNextStepName Ste
 			return nil, fmt.Errorf("invalid try: %w", err)
 		}
 
-		realStep, err = tryStepDef.compile("", "")
+		realStep, err = tryStepDef.compile()
 		if err != nil {
 			return nil, fmt.Errorf("invalid try: %w", err)
 		}
@@ -743,16 +693,10 @@ func newTryStep(stepName StepName, def anonymousStepDef, defaultNextStepName Ste
 	}
 
 	return &tryStep{
-		name:                stepName,
-		realStep:            realStep,
-		retryPolicy:         retry,
-		exceptStep:          except,
-		defaultNextStepName: defaultNextStepName,
+		realStep:    realStep,
+		retryPolicy: retry,
+		exceptStep:  except,
 	}, nil
-}
-
-func (s *tryStep) Name() StepName {
-	return s.name
 }
 
 func (s *tryStep) evaluateRetryPolicy(ev *expression.Evaluator) (*retryPolicy, error) {
@@ -810,12 +754,8 @@ type retryStatus struct {
 func (s *tryStep) execute(ev *expression.Evaluator, retry *retryStatus) (any, StepName, error) {
 	ret, nextStepName, err := s.realStep.Execute(ev)
 	if err == nil {
-		if nextStepName == "" {
-			nextStepName = s.defaultNextStepName
-		}
 		return ret, nextStepName, nil
 	}
-	pp.Println(err)
 
 	var exception types.Exception
 	if !errors.As(err, &exception) {
@@ -846,15 +786,7 @@ func (s *tryStep) execute(ev *expression.Evaluator, retry *retryStatus) (any, St
 		return nil, "", err
 	}
 
-	ret, nextStepName, err = s.exceptStep.execute(ev.SymbolTable, exception)
-	if err != nil {
-		return nil, "", err
-	}
-
-	if nextStepName == "" {
-		nextStepName = s.defaultNextStepName
-	}
-	return ret, nextStepName, nil
+	return s.exceptStep.execute(ev.SymbolTable, exception)
 }
 
 func newExceptStep(def json.RawMessage) (*exceptStep, error) {
@@ -877,9 +809,9 @@ func newExceptStep(def json.RawMessage) (*exceptStep, error) {
 		return nil, fmt.Errorf("as: not a symbol %q", stepDef.As)
 	}
 
-	steps, err := newStepsStep("", anonymousStepDef{
+	steps, err := newAnonymousStepsStep(anonymousStepDef{
 		"steps": stepDef.Steps,
-	}, "")
+	})
 	if err != nil {
 		return nil, fmt.Errorf("steps: %w", err)
 	}
@@ -892,7 +824,7 @@ func newExceptStep(def json.RawMessage) (*exceptStep, error) {
 
 type exceptStep struct {
 	as    *expression.Expr
-	steps *stepsStep
+	steps *anonymousStepsStep
 }
 
 func (s *exceptStep) execute(symbolTable types.SymbolTable, exception types.Exception) (any, StepName, error) {
@@ -914,4 +846,262 @@ func (s *exceptStep) execute(symbolTable types.SymbolTable, exception types.Exce
 	}
 
 	return ret, nextStepName, nil
+}
+
+func newForStep(def anonymousStepDef, parallel *parallelPolicy) (*forStep, error) {
+	type forStepDef struct {
+		Value string             `json:"value"`
+		In    any                `json:"in"`
+		Steps []*workflowStepDef `json:"steps"`
+	}
+
+	var decoded forStepDef
+	if err := json.Unmarshal(def["for"], &decoded); err != nil {
+		return nil, fmt.Errorf("invalid for: %w", err)
+	}
+
+	// parse steps
+	wf := &forStepsWorkflow{
+		stepMap: make(map[StepName]Step, len(decoded.Steps)),
+	}
+	for i, stepDef := range decoded.Steps {
+		if _, duplicated := wf.stepMap[stepDef.name]; duplicated {
+			return nil, fmt.Errorf("%s: duplicated step name in steps", stepDef.name)
+		}
+
+		var defaultNextStepName StepName
+		if i == len(decoded.Steps)-1 {
+			defaultNextStepName = "end"
+		} else {
+			defaultNextStepName = decoded.Steps[i+1].name
+		}
+
+		var err error
+		wf.stepMap[stepDef.name], err = stepDef.compile(defaultNextStepName)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", stepDef.name, err)
+		}
+
+		if wf.entryStep == nil {
+			wf.entryStep = wf.stepMap[stepDef.name]
+		}
+	}
+
+	return &forStep{
+		value:    decoded.Value,
+		in:       decoded.In,
+		workflow: wf,
+		parallel: parallel,
+	}, nil
+}
+
+type forStep struct {
+	value    string
+	in       any
+	workflow *forStepsWorkflow
+	parallel *parallelPolicy
+}
+
+func (s *forStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
+	if s.parallel != nil {
+		return s.executeInParallel(ev)
+	}
+	return s.executeInSerial(ev)
+}
+
+func (s *forStep) executeInSerial(ev *expression.Evaluator) (any, StepName, error) {
+	inAny, err := ev.EvaluateValueRecursive(s.in)
+	if err != nil {
+		return nil, "", fmt.Errorf("in: %w", err)
+	}
+
+	in, ok := inAny.([]any)
+	if !ok {
+		return nil, "", &types.Error{
+			Tag: types.TypeErrorTag,
+			Err: fmt.Errorf("in: must be an array"),
+		}
+	}
+
+	for i, v := range in {
+		symbolTable := types.SymbolTable{s.value: v}.Inherit(ev.SymbolTable)
+		ctrl, err := s.workflow.execute(symbolTable)
+		if err != nil {
+			return nil, "", fmt.Errorf("in[%d]: %w", i, err)
+		}
+
+		if ctrl == breakForStepLoopControl {
+			break
+		} else if ctrl == continueForStepLoopControl {
+			continue
+		}
+
+		panic("unknown loop control without error")
+	}
+
+	return nil, "", nil
+}
+
+func (s *forStep) executeInParallel(ev *expression.Evaluator) (any, StepName, error) {
+	inAny, err := ev.EvaluateValueRecursive(s.in)
+	if err != nil {
+		return nil, "", fmt.Errorf("in: %w", err)
+	}
+
+	in, ok := inAny.([]any)
+	if !ok {
+		return nil, "", &types.Error{
+			Tag: types.TypeErrorTag,
+			Err: fmt.Errorf("in: must be an array"),
+		}
+	}
+
+	symbolTable := ev.SymbolTable.ShallowClone()
+	inheritedVariables := &types.InternalInheritedVariables{
+		Shared: make(map[string]bool, len(symbolTable)),
+	}
+	for key := range symbolTable {
+		inheritedVariables.Shared[key] = false
+	}
+	for i, shared := range s.parallel.shared {
+		ref, err := ev.ResolveReference(shared)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
+		}
+
+		v, err := ref.ResolveVariable(symbolTable)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
+		}
+
+		value := v.Get()
+		v.Set(&types.SharedVariable{Value: value})
+
+		root, _ := v.Paths()
+		inheritedVariables.Shared[root] = true
+	}
+
+	eg := errgroup.Group{}
+	for i, v := range in {
+		i := i
+		v := v
+		eg.Go(func() error {
+			symbolTable := types.SymbolTable{
+				s.value:                                v,
+				types.InternalInheritedVariablesSymbol: inheritedVariables,
+			}.Inherit(symbolTable)
+
+			ctrl, err := s.workflow.execute(symbolTable)
+			if err != nil {
+				return fmt.Errorf("in[%d]: %w", i, err)
+			}
+			if ctrl == continueForStepLoopControl {
+				return nil
+			}
+
+			return nil
+		})
+	}
+	return nil, "", eg.Wait()
+}
+
+type forStepLoopControl int
+
+const (
+	unknownForStepLoopControl forStepLoopControl = iota
+	continueForStepLoopControl
+	breakForStepLoopControl
+)
+
+type forStepsWorkflow struct {
+	entryStep Step
+	stepMap   map[StepName]Step
+}
+
+func (w *forStepsWorkflow) execute(symbolTable types.SymbolTable) (forStepLoopControl, error) {
+	ev := expression.Evaluator{SymbolTable: symbolTable}
+	step := w.entryStep
+	for step != nil {
+		_, nextStepName, err := step.Execute(&ev)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", step.Name(), err)
+		}
+		if nextStepName == "break" {
+			return breakForStepLoopControl, nil
+		} else if nextStepName == "continue" {
+			return continueForStepLoopControl, nil
+		} else if nextStepName == "" {
+			return 0, fmt.Errorf("%s: next step is not defined", step.Name())
+		}
+
+		nextStep, ok := w.stepMap[nextStepName]
+		if !ok {
+			return 0, fmt.Errorf("%s: not found", nextStepName)
+		}
+
+		step = nextStep
+	}
+
+	return continueForStepLoopControl, nil
+}
+
+func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
+	var parallelDef map[string]json.RawMessage
+	if err := json.Unmarshal(def["parallel"], &parallelDef); err != nil {
+		return nil, fmt.Errorf("parallel: %w", err)
+	}
+
+	exceptionPolicy := "continueAll"
+	if exceptionPolicyDef, ok := parallelDef["exception_policy"]; ok {
+		if err := json.Unmarshal(exceptionPolicyDef, &exceptionPolicy); err != nil {
+			return nil, fmt.Errorf("parallel: invalid exception_policy: %w", err)
+		}
+		if exceptionPolicy != "continueAll" {
+			return nil, fmt.Errorf("parallel: unsupported exception_policy: %s", exceptionPolicyDef)
+		}
+	}
+
+	var sharedDef []string
+	if err := json.Unmarshal(parallelDef["shared"], &sharedDef); err != nil {
+		return nil, fmt.Errorf("parallel: invalid shared: %w", err)
+	}
+
+	shared := make([]*expression.Expr, len(sharedDef))
+	for i, def := range sharedDef {
+		var err error
+		shared[i], err = expression.ParseExpr(def)
+		if err != nil {
+			return nil, fmt.Errorf("parallel: invalid shared[%d]: %w", i, err)
+		}
+		if !shared[i].IsField() {
+			return nil, fmt.Errorf("parallel: invalid shared[%d]: must be a variable", i)
+		}
+	}
+
+	policy := &parallelPolicy{
+		exceptionPolicy: exceptionPolicy,
+		shared:          shared,
+	}
+
+	var step AnonymousStep
+	if parallelDef["for"] != nil && parallelDef["branches"] != nil {
+		return nil, fmt.Errorf("parallel: only specify `for` or `branches` either")
+	} else if parallelDef["for"] != nil {
+		var err error
+		step, err = newForStep(parallelDef, policy)
+		if err != nil {
+			return nil, fmt.Errorf("parallel: %w", err)
+		}
+	} else if parallelDef["branches"] != nil {
+		panic("TODO")
+	} else {
+		return nil, fmt.Errorf("parallel: must specify `for` or `branches`")
+	}
+
+	return step, nil
+}
+
+type parallelPolicy struct {
+	exceptionPolicy string
+	shared          []*expression.Expr
 }

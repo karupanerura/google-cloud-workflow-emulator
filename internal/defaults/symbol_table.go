@@ -2,19 +2,19 @@ package defaults
 
 import "github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 
-var DefaultSymbolTable = types.SymbolTable{
+var DefaultSymbolTable = ExpressionHelpers.Inherit(types.SymbolTable{
 	"base64": Base64,
-	"events": nil,
+	"events": Events,
 	"experimental": map[string]any{
-		"executions": nil,
+		"executions": ExperimentalExecutions,
 	},
 	"http":  HTTP,
-	"json":  nil,
+	"json":  JSON,
 	"list":  List,
-	"map":   nil,
-	"math":  nil,
-	"retry": nil,
+	"map":   Map,
+	"math":  Math,
+	"retry": Retry,
 	"sys":   Sys,
-	"text":  nil,
-	"time":  nil,
-}
+	"text":  Text,
+	"time":  Time,
+})

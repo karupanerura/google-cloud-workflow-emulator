@@ -105,3 +105,47 @@ func (e *Evaluator) ResolveReferenceRecursive(value any) (any, error) {
 		return value, nil
 	}
 }
+
+func (e *Evaluator) LockSharedVariablesIfNeeded(exprs ...*Expr) (func(), error) {
+	inheritedVariables, ok := e.SymbolTable[types.InternalInheritedVariablesSymbol].(*types.InternalInheritedVariables)
+	if !ok {
+		return func() {}, nil
+	}
+
+	unlockers := make([]func(), 0, len(exprs))
+	for _, expr := range exprs {
+		ref, err := e.ResolveReference(expr)
+		if err != nil {
+			return nil, err
+		}
+
+		variable, err := ref.ResolveVariable(e.SymbolTable)
+		if err != nil {
+			return nil, err
+		}
+
+		rootSym, _ := variable.Paths()
+		if inheritedVariables.Shared[rootSym] {
+			sharedVar := e.SymbolTable[rootSym].(*types.SharedVariable)
+			sharedVar.Lock()
+			e.SymbolTable[rootSym] = sharedVar.Value
+			unlockers = append(unlockers, func() {
+				sharedVar.Value = e.SymbolTable[rootSym]
+				e.SymbolTable[rootSym] = sharedVar
+				sharedVar.Unlock()
+			})
+		}
+	}
+	if len(unlockers) == 0 {
+		return func() {}, nil
+	}
+	if len(unlockers) == 1 {
+		return unlockers[0], nil
+	}
+
+	return func() {
+		for i := range unlockers {
+			unlockers[len(unlockers)-i-1]()
+		}
+	}, nil
+}

@@ -128,24 +128,31 @@ func (d *workflowStepDef) compile(defaultNextStepName StepName) (Step, error) {
 		return nil, fmt.Errorf("cannot use the special step name %q", d.name)
 	}
 
-	anonStep, err := d.stepDef.compile(d.name, defaultNextStepName)
+	nextStep := defaultNextStepName
+	if nextJSON, ok := d.stepDef["next"]; ok {
+		if err := json.Unmarshal(nextJSON, &nextStep); err != nil {
+			return nil, fmt.Errorf("invalid next: %w", err)
+		}
+		delete(d.stepDef, "next")
+	}
+
+	anonStep, err := d.stepDef.compile()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", d.name, err)
 	}
 
-	step, ok := anonStep.(Step)
-	if !ok || step.Name() != d.name {
-		return nil, fmt.Errorf("%s: invalid step structure", d.name)
-	}
-
-	return step, nil
+	return &namedStep{
+		name: d.name,
+		step: anonStep,
+		next: nextStep,
+	}, nil
 }
 
 type anonymousStepDef map[string]json.RawMessage
 
 var firstLevelFieldsOfStep = []string{"call", "args", "try", "retry", "except", "assign", "steps", "raise", "switch", "result", "next", "return"}
 
-func (def anonymousStepDef) compile(stepName, defaultNextStepName StepName) (AnonymousStep, error) {
+func (def anonymousStepDef) compile() (AnonymousStep, error) {
 	found := map[string]bool{}
 	for _, name := range firstLevelFieldsOfStep {
 		if _, ok := def[name]; ok {
@@ -159,42 +166,37 @@ func (def anonymousStepDef) compile(stepName, defaultNextStepName StepName) (Ano
 	if len(found) != len(def) {
 		return nil, fmt.Errorf("%d not effective fields in the step", len(def)-len(found))
 	}
-	if found["next"] && found["return"] && found["raise"] {
-		return nil, fmt.Errorf("conflict next and return and raise")
+	if found["return"] && found["raise"] {
+		return nil, fmt.Errorf("conflict return and raise")
 	}
 
 	if found["call"] && found["args"] {
-		return newCallStep(stepName, def, defaultNextStepName)
+		return newCallStep(def)
 	} else if found["switch"] {
-		return newSwitchStep(stepName, def, defaultNextStepName)
+		return newSwitchStep(def)
 	} else if found["assign"] {
-		return newAssignStep(stepName, def, defaultNextStepName)
+		return newAssignStep(def)
 	} else if found["try"] && (found["retry"] || found["except"]) {
-		return newTryStep(stepName, def, defaultNextStepName)
+		return newTryStep(def)
 	} else if found["for"] {
-		panic("TODO")
+		return newForStep(def, nil)
 	} else if found["parallel"] {
-		panic("TODO")
+		return newParallelStep(def)
 	} else if found["steps"] {
 		if len(found) != 1 {
 			panic("should not reach at here")
 		}
-		return newStepsStep(stepName, def, defaultNextStepName)
+		return newAnonymousStepsStep(def)
 	} else if found["raise"] {
 		if len(found) != 1 {
 			panic("should not reach at here")
 		}
-		return newRaiseStep(stepName, def)
+		return newRaiseStep(def)
 	} else if found["return"] {
 		if len(found) != 1 {
 			panic("should not reach at here")
 		}
-		return newReturnStep(stepName, def)
-	} else if found["next"] {
-		if len(found) != 1 {
-			panic("should not reach at here")
-		}
-		return newNextStep(stepName, def)
+		return newReturnStep(def)
 	}
 
 	return nil, fmt.Errorf("invalid step")

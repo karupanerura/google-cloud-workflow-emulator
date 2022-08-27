@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"strings"
 
 	reflect "github.com/goccy/go-reflect"
 	"github.com/samber/lo"
@@ -14,29 +15,26 @@ type Function interface {
 }
 
 var nonNilableTypeSet = map[reflect.Kind]bool{
-	reflect.Bool:    true,
-	reflect.Int:     true,
-	reflect.Int8:    true,
-	reflect.Int16:   true,
-	reflect.Int32:   true,
-	reflect.Int64:   true,
-	reflect.Uint:    true,
-	reflect.Uint8:   true,
-	reflect.Uint16:  true,
-	reflect.Uint32:  true,
-	reflect.Uint64:  true,
-	reflect.Float32: true,
-	reflect.Float64: true,
-	reflect.String:  true,
-}
-
-var nilableTypeSet = map[reflect.Kind]bool{
-	reflect.Interface: true,
-	reflect.Ptr:       true,
-	reflect.Map:       true,
-	reflect.Slice:     true,
-	reflect.Chan:      true,
-	reflect.Func:      true,
+	reflect.Bool:          true,
+	reflect.Int:           true,
+	reflect.Int8:          true,
+	reflect.Int16:         true,
+	reflect.Int32:         true,
+	reflect.Int64:         true,
+	reflect.Uint:          true,
+	reflect.Uint8:         true,
+	reflect.Uint16:        true,
+	reflect.Uint32:        true,
+	reflect.Uint64:        true,
+	reflect.Uintptr:       true,
+	reflect.Float32:       true,
+	reflect.Float64:       true,
+	reflect.Complex64:     true,
+	reflect.Complex128:    true,
+	reflect.Array:         true,
+	reflect.String:        true,
+	reflect.Struct:        true,
+	reflect.UnsafePointer: true,
 }
 
 type reflectFunc struct {
@@ -55,6 +53,7 @@ type Argument struct {
 type argDef struct {
 	name                   string
 	valueType              reflect.Type
+	zeroValue              reflect.Value
 	defaultValue           reflect.Value
 	referencedValueNilable bool
 }
@@ -138,6 +137,7 @@ func NewFunction(name string, args []Argument, f any) (Function, error) {
 		// fill argDef
 		defs[i].name = arg.Name
 		defs[i].valueType = argType
+		defs[i].zeroValue = reflect.New(argType).Elem()
 		defs[i].referencedValueNilable = argType.Kind() == reflect.Ptr && nonNilableTypeSet[argType.Elem().Kind()]
 		if arg.Default != nil {
 			defs[i].defaultValue = reflect.ValueOf(arg.Default)
@@ -197,14 +197,17 @@ func (f *reflectFunc) Args() []string {
 }
 
 func (f *reflectFunc) Call(args []any) (any, error) {
+	if len(args) > len(f.args) {
+		return nil, fmt.Errorf("too many arguments: %d arguments are allowed but got %d arguments, usage: %s(%s)", len(f.args), len(args), f.name, renderArgDefs(f.args))
+	}
 	if !(f.minimumArgs <= len(args) && len(args) <= len(f.args)) {
-		return nil, fmt.Errorf("missing arguments: %d arguments required but got %d", f.minimumArgs, len(args))
+		return nil, fmt.Errorf("missing arguments: %d arguments are required but got %d arguments, usage: %s(%s)", f.minimumArgs, len(args), f.name, renderArgDefs(f.args))
 	}
 
 	argValues := make([]reflect.Value, len(f.args))
 	for i, arg := range f.args {
 		// fill default value for missing args
-		if i >= len(args) {
+		if i >= len(args) || args[i] == SubstitutionNone {
 			if !arg.defaultValue.IsValid() {
 				return nil, fmt.Errorf("missing argument[%d] %s", i, arg.name)
 			}
@@ -214,20 +217,10 @@ func (f *reflectFunc) Call(args []any) (any, error) {
 
 		argValues[i] = reflect.ValueOf(args[i])
 
-		// fill default value for nil value
+		// fill zero value for explicit nil value
 		if !argValues[i].IsValid() {
-			argValues[i] = arg.getDefaultValue()
+			argValues[i] = arg.zeroValue
 			continue
-		}
-		if arg.defaultValue.IsValid() {
-			if arg.referencedValueNilable && nilableTypeSet[argValues[i].Kind()] && argValues[i].IsNil() {
-				argValues[i] = arg.getDefaultValue()
-				continue
-			}
-			if argValues[i].IsZero() && argValues[i].Type().AssignableTo(arg.valueType) {
-				argValues[i] = arg.getDefaultValue()
-				continue
-			}
 		}
 
 		// check assignable
@@ -252,6 +245,26 @@ func (f *reflectFunc) Call(args []any) (any, error) {
 
 	result := ret[0].Interface()
 	return result, nil
+}
+
+func renderArgDefs(args []argDef) string {
+	var s strings.Builder
+	for i, arg := range args {
+		if i != 0 {
+			s.WriteString(", ")
+		}
+
+		s.WriteString(arg.name)
+		if !arg.defaultValue.IsValid() {
+			continue
+		} else if arg.defaultValue.IsZero() {
+			s.WriteByte('?')
+		} else {
+			s.WriteString(" = ")
+			fmt.Fprint(&s, arg.defaultValue.Interface())
+		}
+	}
+	return s.String()
 }
 
 func NewRawFunction(name string, args []Argument, f func([]any) (any, error)) Function {
@@ -280,7 +293,18 @@ func (f *rawFunction) Args() []string {
 
 func (f *rawFunction) Call(args []any) (any, error) {
 	if len(args) > len(f.args) {
-		args = args[:len(f.args)]
+		return nil, fmt.Errorf("invalid function usage: %s(%s)", f.name, renderArguments(f.args))
+	}
+	for i, arg := range args {
+		if arg != SubstitutionNone {
+			continue
+		}
+
+		if f.args[i].Optional {
+			args[i] = nil
+		} else if f.args[i].Default != nil {
+			args[i] = f.args[i].Default
+		}
 	}
 	for len(args) < len(f.args) {
 		if f.args[len(args)].Optional {
@@ -289,4 +313,22 @@ func (f *rawFunction) Call(args []any) (any, error) {
 		args = append(args, f.args[len(args)].Default)
 	}
 	return f.f(args)
+}
+
+func renderArguments(args []Argument) string {
+	var s strings.Builder
+	for i, arg := range args {
+		if i != 0 {
+			s.WriteString(", ")
+		}
+
+		s.WriteString(arg.Name)
+		if arg.Optional {
+			s.WriteByte('?')
+		} else if arg.Default != nil {
+			s.WriteString(" = ")
+			fmt.Fprint(&s, arg.Default)
+		}
+	}
+	return s.String()
 }

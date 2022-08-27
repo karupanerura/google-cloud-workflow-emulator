@@ -1,6 +1,24 @@
 package types
 
-import "github.com/samber/lo"
+import (
+	"sync"
+
+	"github.com/samber/lo"
+)
+
+const (
+	// internal symbols
+	InternalInheritedVariablesSymbol = "__INTERNAL_INHERITED_VARIABLE_SET"
+)
+
+type InternalInheritedVariables struct {
+	Shared map[string]bool
+}
+
+type SharedVariable struct {
+	sync.RWMutex
+	Value any
+}
 
 type SymbolTable map[string]any
 

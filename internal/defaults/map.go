@@ -6,8 +6,8 @@ import (
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 )
 
-var Map = map[string]any{
-	"get": types.MustNewFunction("map.get", []types.Argument{
+var Map = aggregateFunctionsToMap("map", []types.Function{
+	types.MustNewFunction("map.get", []types.Argument{
 		{Name: "map", Optional: true},
 		{Name: "keys"},
 	}, func(m map[string]any, keysRaw any) (any, error) {
@@ -50,4 +50,4 @@ var Map = map[string]any{
 		}
 		return context, nil
 	}),
-}
+})
