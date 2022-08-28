@@ -564,6 +564,9 @@ func (c *httpClient) setOAuth2Headers(req *http.Request, auth map[string]any) er
 				scopes = append(scopes, vv[i:j])
 				i = j + 1
 			}
+			if i < len(vv) {
+				scopes = append(scopes, vv[i:])
+			}
 
 		case []string:
 			scopes = vv
