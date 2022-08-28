@@ -1127,7 +1127,7 @@ func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parallel: invalid shared[%d]: %w", i, err)
 		}
-		if !shared[i].IsField() {
+		if !shared[i].IsSymbol() {
 			return nil, fmt.Errorf("parallel: invalid shared[%d]: must be a variable", i)
 		}
 	}
