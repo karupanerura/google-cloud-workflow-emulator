@@ -10,7 +10,7 @@ Unofficial [Google Cloud Workflow](https://cloud.google.com/workflows) emulator.
 $ go install github.com/karupanerura/google-cloud-workflow-emulator/cmd/google-cloud-workflow-emulator@latest
 ```
 
-TODO: 
+TODO: add pre-built binary
 
 ## Usage
 
