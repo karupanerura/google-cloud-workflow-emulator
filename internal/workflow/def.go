@@ -150,7 +150,7 @@ func (d *workflowStepDef) compile(defaultNextStepName StepName) (Step, error) {
 
 type anonymousStepDef map[string]json.RawMessage
 
-var firstLevelFieldsOfStep = []string{"call", "args", "try", "retry", "except", "assign", "steps", "raise", "switch", "result", "next", "return"}
+var firstLevelFieldsOfStep = []string{"call", "args", "try", "retry", "except", "for", "parallel", "assign", "steps", "raise", "switch", "result", "next", "return"}
 
 func (def anonymousStepDef) compile() (AnonymousStep, error) {
 	found := map[string]bool{}

@@ -860,6 +860,18 @@ func newForStep(def anonymousStepDef, parallel *parallelPolicy) (*forStep, error
 		return nil, fmt.Errorf("invalid for: %w", err)
 	}
 
+	var err error
+	decoded.In, err = expression.ExpandExprRecursive(decoded.In)
+	if err != nil {
+		return nil, fmt.Errorf("invalid for.in: %w", err)
+	}
+	switch decoded.In.(type) {
+	case []any, *expression.Expr:
+		// ok
+	default:
+		return nil, fmt.Errorf("invalid for.in: must be an array or expression")
+	}
+
 	// parse steps
 	wf := &forStepsWorkflow{
 		stepMap: make(map[StepName]Step, len(decoded.Steps)),
@@ -871,7 +883,7 @@ func newForStep(def anonymousStepDef, parallel *parallelPolicy) (*forStep, error
 
 		var defaultNextStepName StepName
 		if i == len(decoded.Steps)-1 {
-			defaultNextStepName = "end"
+			defaultNextStepName = "break"
 		} else {
 			defaultNextStepName = decoded.Steps[i+1].name
 		}
