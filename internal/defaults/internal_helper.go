@@ -7,8 +7,8 @@ import (
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 )
 
-func aggregateFunctionsToSymbolTable(funcs ...types.Function) types.SymbolTable {
-	m := make(types.SymbolTable, len(funcs))
+func aggregateFunctionsToReadonlySymbolTable(funcs ...types.Function) *types.SymbolTable {
+	m := make(map[string]any, len(funcs))
 	for _, f := range funcs {
 		name := f.Name()
 		if _, duplicated := m[name]; duplicated {
@@ -16,7 +16,10 @@ func aggregateFunctionsToSymbolTable(funcs ...types.Function) types.SymbolTable 
 		}
 		m[name] = f
 	}
-	return m
+	return &types.SymbolTable{
+		Symbols:  m,
+		ReadOnly: true,
+	}
 }
 
 func aggregateFunctionsToMap(prefix string, funcs []types.Function) map[string]any {

@@ -9,8 +9,8 @@ import (
 )
 
 type Reference interface {
-	ResolveVariable(types.SymbolTable) (Variable, error)
-	ResolveValue(types.SymbolTable) (Value, error)
+	ResolveVariable(*types.SymbolTable) (Variable, error)
+	ResolveValue(*types.SymbolTable) (Value, error)
 }
 
 type Value interface {
@@ -73,24 +73,26 @@ type symbolReference struct {
 	name string
 }
 
-func (r *symbolReference) ResolveVariable(st types.SymbolTable) (Variable, error) {
-	if v, shared := st[r.name].(*types.SharedVariable); shared {
-		return &pureVariable{
-			getPath: func() string {
-				return r.name
-			},
-			getPaths: func() (string, []any) {
-				return r.name, nil
-			},
-			getter: func() any {
-				v.RLock()
-				defer v.RUnlock()
-				return v.Value
-			},
-			setter: func(value any) {
-				st[r.name] = value
-			},
-		}, nil
+func (r *symbolReference) ResolveVariable(st *types.SymbolTable) (Variable, error) {
+	if v, ok := st.Get(r.name); ok {
+		if vv, shared := v.(*types.SharedVariable); shared {
+			return &pureVariable{
+				getPath: func() string {
+					return r.name
+				},
+				getPaths: func() (string, []any) {
+					return r.name, nil
+				},
+				getter: func() any {
+					vv.RLock()
+					defer vv.RUnlock()
+					return vv.Value
+				},
+				setter: func(value any) {
+					vv.Value = value
+				},
+			}, nil
+		}
 	}
 
 	return &pureVariable{
@@ -101,16 +103,17 @@ func (r *symbolReference) ResolveVariable(st types.SymbolTable) (Variable, error
 			return r.name, nil
 		},
 		getter: func() any {
-			return st[r.name]
+			v, _ := st.Get(r.name)
+			return v
 		},
 		setter: func(value any) {
-			st[r.name] = value
+			st.Set(r.name, value)
 		},
 	}, nil
 }
 
-func (r *symbolReference) ResolveValue(st types.SymbolTable) (Value, error) {
-	if _, ok := st[r.name]; !ok {
+func (r *symbolReference) ResolveValue(st *types.SymbolTable) (Value, error) {
+	if _, ok := st.Get(r.name); !ok {
 		return nil, &types.Error{
 			Tag: types.TypeErrorTag,
 			Err: fmt.Errorf("not found symbol: %s", r.name),
@@ -153,7 +156,7 @@ func (r *fieldReference) resolvePath(context Value) string {
 	return b.String()
 }
 
-func (r *fieldReference) ResolveVariable(st types.SymbolTable) (Variable, error) {
+func (r *fieldReference) ResolveVariable(st *types.SymbolTable) (Variable, error) {
 	contextRef, err := r.context.ResolveValue(st)
 	if err != nil {
 		return nil, err
@@ -185,7 +188,7 @@ func (r *fieldReference) ResolveVariable(st types.SymbolTable) (Variable, error)
 	}, nil
 }
 
-func (r *fieldReference) ResolveValue(st types.SymbolTable) (Value, error) {
+func (r *fieldReference) ResolveValue(st *types.SymbolTable) (Value, error) {
 	contextRef, err := r.context.ResolveValue(st)
 	if err != nil {
 		return nil, err
@@ -247,7 +250,7 @@ func (r *indexReference) resolvePath(context Value) string {
 	return b.String()
 }
 
-func (r *indexReference) ResolveVariable(st types.SymbolTable) (Variable, error) {
+func (r *indexReference) ResolveVariable(st *types.SymbolTable) (Variable, error) {
 	contextRef, err := r.context.ResolveValue(st)
 	if err != nil {
 		return nil, err
@@ -286,7 +289,7 @@ func (r *indexReference) ResolveVariable(st types.SymbolTable) (Variable, error)
 	}, nil
 }
 
-func (r *indexReference) ResolveValue(st types.SymbolTable) (Value, error) {
+func (r *indexReference) ResolveValue(st *types.SymbolTable) (Value, error) {
 	v, err := r.ResolveVariable(st)
 	if err != nil {
 		return nil, err

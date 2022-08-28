@@ -9,14 +9,14 @@ import (
 )
 
 type operation interface {
-	execute(types.SymbolTable) (any, error)
+	execute(*types.SymbolTable) (any, error)
 }
 
 var nullLiteralOperation = nullLiteralOperationTyp{}
 
 type nullLiteralOperationTyp struct{}
 
-func (s nullLiteralOperationTyp) execute(types.SymbolTable) (any, error) {
+func (s nullLiteralOperationTyp) execute(*types.SymbolTable) (any, error) {
 	return nil, nil
 }
 
@@ -24,7 +24,7 @@ type valueOperation[T any] struct {
 	value T
 }
 
-func (s *valueOperation[T]) execute(types.SymbolTable) (any, error) {
+func (s *valueOperation[T]) execute(*types.SymbolTable) (any, error) {
 	return s.value, nil
 }
 
@@ -37,7 +37,7 @@ type retrieveSymbolOperation struct {
 	name string
 }
 
-func (s *retrieveSymbolOperation) execute(types.SymbolTable) (any, error) {
+func (s *retrieveSymbolOperation) execute(*types.SymbolTable) (any, error) {
 	return &symbolReference{name: s.name}, nil
 }
 
@@ -46,7 +46,7 @@ type retrieveFieldOperation struct {
 	field   operation
 }
 
-func (s *retrieveFieldOperation) execute(st types.SymbolTable) (any, error) {
+func (s *retrieveFieldOperation) execute(st *types.SymbolTable) (any, error) {
 	rawContext, err := s.context.execute(st)
 	if err != nil {
 		return nil, fmt.Errorf("invalid context: %w", err)
@@ -91,7 +91,7 @@ type calculateUnaryOperation struct {
 	value    operation
 }
 
-func (s *calculateUnaryOperation) execute(st types.SymbolTable) (any, error) {
+func (s *calculateUnaryOperation) execute(st *types.SymbolTable) (any, error) {
 	value, err := s.value.execute(st)
 	if err != nil {
 		return nil, fmt.Errorf("value of unary operator %q: %w", s.operator, err)
@@ -158,7 +158,7 @@ type calculateBinaryOperation struct {
 	right    operation
 }
 
-func (s *calculateBinaryOperation) execute(st types.SymbolTable) (any, error) {
+func (s *calculateBinaryOperation) execute(st *types.SymbolTable) (any, error) {
 	left, err := s.left.execute(st)
 	if err != nil {
 		return nil, fmt.Errorf("left of operator %q: %w", s.operator, err)
@@ -503,7 +503,7 @@ type callFunctionOperation struct {
 	args     []operation
 }
 
-func (s *callFunctionOperation) execute(st types.SymbolTable) (any, error) {
+func (s *callFunctionOperation) execute(st *types.SymbolTable) (any, error) {
 	value, err := s.function.execute(st)
 	if err != nil {
 		return nil, err

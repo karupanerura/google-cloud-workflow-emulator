@@ -21,7 +21,7 @@ func TestParseExpr(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
-		symbols               types.SymbolTable
+		symbols               *types.SymbolTable
 		source                string
 		expected              any
 		expectToBeParseErr    bool
@@ -106,93 +106,115 @@ func TestParseExpr(t *testing.T) {
 		},
 		{
 			source: "sym",
-			symbols: types.SymbolTable{
-				"sym": map[string]string{"a": "b"},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]string{"a": "b"},
+				},
 			},
 			expected: map[string]string{"a": "b"},
 		},
 		{
 			source: "unknown",
-			symbols: types.SymbolTable{
-				"sym": map[string]string{"a": "b"},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]string{"a": "b"},
+				},
 			},
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"foo": true,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"foo": true,
+					},
 				},
 			},
 			source:   "sym.foo",
 			expected: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"foo": true,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"foo": true,
+					},
 				},
 			},
 			source:   `sym["foo"]`,
 			expected: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": []any{false, true},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": []any{false, true},
+				},
 			},
 			source:   `sym[1]`,
 			expected: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"f+o+o": []any{true},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"f+o+o": []any{true},
+					},
 				},
 			},
 			source:   `sym["f+o+o"][0]`,
 			expected: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"f+o+o": []any{true},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"f+o+o": []any{true},
+					},
 				},
 			},
 			source:                `sym[0]`,
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"f+o+o": []any{true},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"f+o+o": []any{true},
+					},
 				},
 			},
 			source:                `sym["f+o+o"][1]`,
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"f+o+o": []any{true},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"f+o+o": []any{true},
+					},
 				},
 			},
 			source:                `sym["f+o+o"][-1]`,
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"f+o+o": []any{true},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"f+o+o": []any{true},
+					},
 				},
 			},
 			source:                `sym["f+o+o"]["0"]`,
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"foo": map[string]any{
-						"bar": false,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"foo": map[string]any{
+							"bar": false,
+						},
 					},
 				},
 			},
@@ -200,10 +222,12 @@ func TestParseExpr(t *testing.T) {
 			expected: false,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"foo": map[string]any{
-						"bar": map[string]any{},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"foo": map[string]any{
+							"bar": map[string]any{},
+						},
 					},
 				},
 			},
@@ -211,39 +235,47 @@ func TestParseExpr(t *testing.T) {
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": 1,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": 1,
+				},
 			},
 			source:                "sym.foo",
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": function(func([]any) (any, error) {
-					return "called!", nil
-				}),
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": function(func([]any) (any, error) {
+						return "called!", nil
+					}),
+				},
 			},
 			source:   `sym()`,
 			expected: "called!",
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"foo": function(func([]any) (any, error) {
-						return "called!!", nil
-					}),
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"foo": function(func([]any) (any, error) {
+							return "called!!", nil
+						}),
+					},
 				},
 			},
 			source:   "sym.foo()",
 			expected: "called!!",
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": map[string]any{
-					"foo": map[string]any{
-						"bar": function(func([]any) (any, error) {
-							return "called!!!", nil
-						}),
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": map[string]any{
+						"foo": map[string]any{
+							"bar": function(func([]any) (any, error) {
+								return "called!!!", nil
+							}),
+						},
 					},
 				},
 			},
@@ -251,17 +283,21 @@ func TestParseExpr(t *testing.T) {
 			expected: "called!!!",
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": nil,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": nil,
+				},
 			},
 			source:                "sym()",
 			expectToBeEvaluateErr: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"sym": function(func([]any) (any, error) {
-					return nil, fmt.Errorf("function internal error")
-				}),
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": function(func([]any) (any, error) {
+						return nil, fmt.Errorf("function internal error")
+					}),
+				},
 			},
 			source:                `sym()`,
 			expectToBeEvaluateErr: true,
@@ -455,10 +491,12 @@ func TestParseExpr(t *testing.T) {
 			expected: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"x": function(func([]any) (any, error) {
-					return nil, nil
-				}),
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"x": function(func([]any) (any, error) {
+						return nil, nil
+					}),
+				},
 			},
 			source:   "x()==null",
 			expected: true,
@@ -593,54 +631,66 @@ func TestParseExpr(t *testing.T) {
 		},
 		{
 			source: `"b" in sym`,
-			symbols: types.SymbolTable{
-				"sym": []any{"a", "b", "c"},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": []any{"a", "b", "c"},
+				},
 			},
 			expected: true,
 		},
 		{
 			source: `"d" in sym`,
-			symbols: types.SymbolTable{
-				"sym": []any{"a", "b", "c"},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": []any{"a", "b", "c"},
+				},
 			},
 			expected: false,
 		},
 		{
 			source: `1 in sym`,
-			symbols: types.SymbolTable{
-				"sym": []any{"a", "b", "c"},
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"sym": []any{"a", "b", "c"},
+				},
 			},
 			expected: false,
 		},
 		{
 			source: `"b" in map`,
-			symbols: types.SymbolTable{
-				"map": map[string]any{
-					"a": nil,
-					"b": nil,
-					"c": nil,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"map": map[string]any{
+						"a": nil,
+						"b": nil,
+						"c": nil,
+					},
 				},
 			},
 			expected: true,
 		},
 		{
 			source: `"d" in map`,
-			symbols: types.SymbolTable{
-				"map": map[string]any{
-					"a": nil,
-					"b": nil,
-					"c": nil,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"map": map[string]any{
+						"a": nil,
+						"b": nil,
+						"c": nil,
+					},
 				},
 			},
 			expected: false,
 		},
 		{
 			source: `1 in map`,
-			symbols: types.SymbolTable{
-				"map": map[string]any{
-					"a": nil,
-					"b": nil,
-					"c": nil,
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"map": map[string]any{
+						"a": nil,
+						"b": nil,
+						"c": nil,
+					},
 				},
 			},
 			expectToBeEvaluateErr: true,
@@ -658,52 +708,58 @@ func TestParseExpr(t *testing.T) {
 			expected: "abcdef",
 		},
 		{
-			symbols: types.SymbolTable{
-				"a": function(func(args []any) (any, error) {
-					if len(args) != 1 {
-						return nil, fmt.Errorf("needs a 1 argument but got: %d", len(args))
-					}
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"a": function(func(args []any) (any, error) {
+						if len(args) != 1 {
+							return nil, fmt.Errorf("needs a 1 argument but got: %d", len(args))
+						}
 
-					s, ok := args[0].(string)
-					if !ok {
-						return nil, fmt.Errorf("needs a string argument but got: %v", args[0])
-					}
+						s, ok := args[0].(string)
+						if !ok {
+							return nil, fmt.Errorf("needs a string argument but got: %v", args[0])
+						}
 
-					return "(" + s + ")", nil
-				}),
+						return "(" + s + ")", nil
+					}),
+				},
 			},
 			source:   `a("a"+"b")+"c"`,
 			expected: "(ab)c",
 		},
 		{
-			symbols: types.SymbolTable{
-				"a": map[string]any{
-					"b": function(func([]any) (any, error) {
-						return true, nil
-					}),
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"a": map[string]any{
+						"b": function(func([]any) (any, error) {
+							return true, nil
+						}),
+					},
 				},
 			},
 			source:   `a.b()`,
 			expected: true,
 		},
 		{
-			symbols: types.SymbolTable{
-				"a": map[string]any{
-					"b": function(func(args []any) (any, error) {
-						if len(args) != 2 {
-							return nil, fmt.Errorf("needs a 2 argument but got: %d", len(args))
-						}
-
-						var s int64 = 0
-						for _, arg := range args {
-							n, ok := arg.(int64)
-							if !ok {
-								return nil, fmt.Errorf("needs int64 argument but got: %v", arg)
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"a": map[string]any{
+						"b": function(func(args []any) (any, error) {
+							if len(args) != 2 {
+								return nil, fmt.Errorf("needs a 2 argument but got: %d", len(args))
 							}
-							s += n
-						}
-						return s, nil
-					}),
+
+							var s int64 = 0
+							for _, arg := range args {
+								n, ok := arg.(int64)
+								if !ok {
+									return nil, fmt.Errorf("needs int64 argument but got: %v", arg)
+								}
+								s += n
+							}
+							return s, nil
+						}),
+					},
 				},
 			},
 			source:   `a.b(1, a.b(2, 3)) * 3`,

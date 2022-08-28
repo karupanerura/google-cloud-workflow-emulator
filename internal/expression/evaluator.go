@@ -7,7 +7,7 @@ import (
 )
 
 type Evaluator struct {
-	SymbolTable types.SymbolTable
+	SymbolTable *types.SymbolTable
 }
 
 func (e *Evaluator) EvaluateValue(expr *Expr) (ret any, err error) {
@@ -107,10 +107,11 @@ func (e *Evaluator) ResolveReferenceRecursive(value any) (any, error) {
 }
 
 func (e *Evaluator) LockSharedVariablesIfNeeded(exprs ...*Expr) (func(), error) {
-	inheritedVariables, ok := e.SymbolTable[types.InternalInheritedVariablesSymbol].(*types.InternalInheritedVariables)
+	inheritedVariablesAny, ok := e.SymbolTable.Get(types.InternalInheritedVariablesSymbol)
 	if !ok {
 		return func() {}, nil
 	}
+	inheritedVariables := inheritedVariablesAny.(*types.InternalInheritedVariables)
 
 	unlockers := make([]func(), 0, len(exprs))
 	for _, expr := range exprs {
@@ -126,12 +127,17 @@ func (e *Evaluator) LockSharedVariablesIfNeeded(exprs ...*Expr) (func(), error) 
 
 		rootSym, _ := variable.Paths()
 		if inheritedVariables.Shared[rootSym] {
-			sharedVar := e.SymbolTable[rootSym].(*types.SharedVariable)
+			v, ok := e.SymbolTable.Get(rootSym)
+			if !ok {
+				panic(fmt.Sprintf("assertion failure: not found shared variable=%q", rootSym))
+			}
+
+			sharedVar := v.(*types.SharedVariable)
 			sharedVar.Lock()
-			e.SymbolTable[rootSym] = sharedVar.Value
+			e.SymbolTable.Set(rootSym, sharedVar.Value)
 			unlockers = append(unlockers, func() {
-				sharedVar.Value = e.SymbolTable[rootSym]
-				e.SymbolTable[rootSym] = sharedVar
+				sharedVar.Value, _ = e.SymbolTable.Get(rootSym)
+				e.SymbolTable.Set(rootSym, sharedVar)
 				sharedVar.Unlock()
 			})
 		}
@@ -145,7 +151,7 @@ func (e *Evaluator) LockSharedVariablesIfNeeded(exprs ...*Expr) (func(), error) 
 
 	return func() {
 		for i := range unlockers {
-			unlockers[len(unlockers)-i-1]()
+			unlockers[len(unlockers)-i-1]() // unlock by reversed order
 		}
 	}, nil
 }

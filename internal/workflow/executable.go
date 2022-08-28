@@ -22,12 +22,10 @@ func (r WorkflowRoot) Execute(args any) (any, error) {
 		return nil, fmt.Errorf("main workflow is not defined")
 	}
 
-	argsSymbolTable := types.SymbolTable{}
-	if len(mainWorkflow.Params) == 1 {
-		argsSymbolTable[mainWorkflow.Params[0].Name] = args
+	st := &types.SymbolTable{
+		Symbols: map[string]any{},
+		Parent:  defaults.DefaultSymbolTable,
 	}
-
-	st := types.SymbolTable{}
 	for name, workflow := range r {
 		if name == "main" {
 			continue
@@ -35,16 +33,22 @@ func (r WorkflowRoot) Execute(args any) (any, error) {
 
 		name := name
 		workflow := workflow
-		st[name] = types.NewRawFunction(name, workflow.Params, func(args []any) (any, error) {
-			st := st.Inherit(defaults.DefaultSymbolTable)
+		st.Symbols[name] = types.NewRawFunction(name, workflow.Params, func(args []any) (any, error) {
+			st := &types.SymbolTable{
+				Symbols: map[string]any{},
+				Parent:  defaults.DefaultSymbolTable,
+			}
 			for i, param := range workflow.Params {
-				st[param.Name] = args[i]
+				st.Symbols[param.Name] = args[i]
 			}
 			return workflow.Execute(st)
 		})
 	}
 
-	return mainWorkflow.Execute(argsSymbolTable.Inherit(st.Inherit(defaults.DefaultSymbolTable)))
+	if len(mainWorkflow.Params) == 1 {
+		st.Symbols[mainWorkflow.Params[0].Name] = args
+	}
+	return mainWorkflow.Execute(st)
 }
 
 type Workflow struct {
@@ -55,21 +59,21 @@ type Workflow struct {
 	stepMap   map[StepName]Step
 }
 
-func (w *Workflow) Execute(symbolTable types.SymbolTable) (ret any, err error) {
+func (w *Workflow) Execute(symbolTable *types.SymbolTable) (ret any, err error) {
 	for _, param := range w.Params {
-		if _, ok := symbolTable[param.Name]; ok {
+		if _, ok := symbolTable.Symbols[param.Name]; ok {
 			continue
 		}
 		if param.Optional {
 			continue
 		}
 		if param.Default != nil {
-			symbolTable[param.Name] = param.Default
+			symbolTable.Symbols[param.Name] = param.Default
 		}
 		return nil, fmt.Errorf("missing param: %s", param.Name)
 	}
 
-	ev := expression.Evaluator{SymbolTable: symbolTable.Inherit(defaults.DefaultSymbolTable)}
+	ev := expression.Evaluator{SymbolTable: symbolTable}
 	step := w.entryStep
 	for step != nil {
 		var nextStepName StepName
@@ -174,11 +178,14 @@ func newAssignStep(def anonymousStepDef) (*assignStep, error) {
 }
 
 func (s *assignStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
-	inheritedVariables, _ := ev.SymbolTable[types.InternalInheritedVariablesSymbol].(*types.InternalInheritedVariables)
-	if inheritedVariables != nil {
+	var inheritedVariables *types.InternalInheritedVariables
+	if v, ok := ev.SymbolTable.Get(types.InternalInheritedVariablesSymbol); ok {
+		inheritedVariables = v.(*types.InternalInheritedVariables)
+
 		exprs := lo.Map(s.assigns, func(assign assignOperation, _ int) *expression.Expr {
 			return assign.left
 		})
+
 		unlock, err := ev.LockSharedVariablesIfNeeded(exprs...)
 		if err != nil {
 			return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
@@ -410,14 +417,12 @@ func newCallStep(def anonymousStepDef) (*callStep, error) {
 }
 
 func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
-	if _, ok := ev.SymbolTable[types.InternalInheritedVariablesSymbol].(*types.InternalInheritedVariables); ok {
-		if s.result != nil {
-			unlock, err := ev.LockSharedVariablesIfNeeded(s.result)
-			if err != nil {
-				return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
-			}
-			defer unlock()
+	if _, ok := ev.SymbolTable.Get(types.InternalInheritedVariablesSymbol); ok && s.result != nil {
+		unlock, err := ev.LockSharedVariablesIfNeeded(s.result)
+		if err != nil {
+			return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
 		}
+		defer unlock()
 	}
 
 	callRef, err := ev.ResolveReference(s.call)
@@ -827,7 +832,7 @@ type exceptStep struct {
 	steps *anonymousStepsStep
 }
 
-func (s *exceptStep) execute(symbolTable types.SymbolTable, exception types.Exception) (any, StepName, error) {
+func (s *exceptStep) execute(symbolTable *types.SymbolTable, exception types.Exception) (any, StepName, error) {
 	evaluator := expression.Evaluator{SymbolTable: symbolTable.ShallowClone()}
 	ref, err := evaluator.ResolveReference(s.as)
 	if err != nil {
@@ -856,11 +861,15 @@ func newForStep(def anonymousStepDef, parallel *parallelPolicy) (*forStep, error
 	}
 
 	var decoded forStepDef
-	if err := json.Unmarshal(def["for"], &decoded); err != nil {
+	if err := unmarshalJSONUseNumber(def["for"], &decoded); err != nil {
 		return nil, fmt.Errorf("invalid for: %w", err)
 	}
 
 	var err error
+	decoded.In, err = decodeJSONNumberRecursive(decoded.In)
+	if err != nil {
+		return nil, fmt.Errorf("invalid for.in: %w", err)
+	}
 	decoded.In, err = expression.ExpandExprRecursive(decoded.In)
 	if err != nil {
 		return nil, fmt.Errorf("invalid for.in: %w", err)
@@ -883,7 +892,7 @@ func newForStep(def anonymousStepDef, parallel *parallelPolicy) (*forStep, error
 
 		var defaultNextStepName StepName
 		if i == len(decoded.Steps)-1 {
-			defaultNextStepName = "break"
+			defaultNextStepName = "continue"
 		} else {
 			defaultNextStepName = decoded.Steps[i+1].name
 		}
@@ -936,7 +945,13 @@ func (s *forStep) executeInSerial(ev *expression.Evaluator) (any, StepName, erro
 	}
 
 	for i, v := range in {
-		symbolTable := types.SymbolTable{s.value: v}.Inherit(ev.SymbolTable)
+		symbolTable := &types.SymbolTable{
+			Symbols: map[string]any{
+				s.value: v,
+			},
+			Parent: ev.SymbolTable,
+		}
+
 		ctrl, err := s.workflow.execute(symbolTable)
 		if err != nil {
 			return nil, "", fmt.Errorf("in[%d]: %w", i, err)
@@ -970,9 +985,9 @@ func (s *forStep) executeInParallel(ev *expression.Evaluator) (any, StepName, er
 
 	symbolTable := ev.SymbolTable.ShallowClone()
 	inheritedVariables := &types.InternalInheritedVariables{
-		Shared: make(map[string]bool, len(symbolTable)),
+		Shared: make(map[string]bool, len(symbolTable.Symbols)),
 	}
-	for key := range symbolTable {
+	for key := range symbolTable.KeysChan() {
 		inheritedVariables.Shared[key] = false
 	}
 	for i, shared := range s.parallel.shared {
@@ -992,16 +1007,19 @@ func (s *forStep) executeInParallel(ev *expression.Evaluator) (any, StepName, er
 		root, _ := v.Paths()
 		inheritedVariables.Shared[root] = true
 	}
+	symbolTable.Symbols[types.InternalInheritedVariablesSymbol] = inheritedVariables
 
 	eg := errgroup.Group{}
 	for i, v := range in {
 		i := i
 		v := v
 		eg.Go(func() error {
-			symbolTable := types.SymbolTable{
-				s.value:                                v,
-				types.InternalInheritedVariablesSymbol: inheritedVariables,
-			}.Inherit(symbolTable)
+			symbolTable := &types.SymbolTable{
+				Symbols: map[string]any{
+					s.value: v,
+				},
+				Parent: symbolTable,
+			}
 
 			ctrl, err := s.workflow.execute(symbolTable)
 			if err != nil {
@@ -1030,7 +1048,7 @@ type forStepsWorkflow struct {
 	stepMap   map[StepName]Step
 }
 
-func (w *forStepsWorkflow) execute(symbolTable types.SymbolTable) (forStepLoopControl, error) {
+func (w *forStepsWorkflow) execute(symbolTable *types.SymbolTable) (forStepLoopControl, error) {
 	ev := expression.Evaluator{SymbolTable: symbolTable}
 	step := w.entryStep
 	for step != nil {

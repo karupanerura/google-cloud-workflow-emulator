@@ -8,7 +8,7 @@ import (
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 )
 
-var ExpressionHelpers = aggregateFunctionsToSymbolTable(
+var ExpressionHelpers = aggregateFunctionsToReadonlySymbolTable(
 	types.MustNewFunction("double", []types.Argument{
 		{Name: "attribute"},
 	}, func(attribute any) (float64, error) {
