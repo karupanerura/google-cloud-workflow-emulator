@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -161,6 +162,7 @@ var HTTP = mergeMaps(
 )
 
 type httpClient struct {
+	sync.RWMutex
 	defaultBodyKind        bodyKind
 	oidcTokenSourceCache   map[string]oauth2.TokenSource
 	oauth2TokenSourceCache map[string]oauth2.TokenSource
@@ -484,6 +486,9 @@ func (c *httpClient) setAuthHeaders(u *url.URL, req *http.Request, auth map[stri
 }
 
 func (c *httpClient) setOIDCAuthHeaders(u *url.URL, req *http.Request, auth map[string]any) error {
+	c.Lock()
+	defer c.Unlock()
+
 	audience, ok := auth["audience"].(string)
 	if !ok {
 		audience = u.String()
@@ -531,6 +536,9 @@ var oauth2ScopeSeparatorSet = map[byte]struct{}{
 }
 
 func (c *httpClient) setOAuth2Headers(req *http.Request, auth map[string]any) error {
+	c.Lock()
+	defer c.Unlock()
+
 	var scopes []string
 	for _, key := range []string{"scope", "scopes"} {
 		v, ok := auth[key]
