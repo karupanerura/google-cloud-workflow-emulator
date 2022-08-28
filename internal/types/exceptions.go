@@ -22,6 +22,7 @@ const (
 	ResourceLimitErrorTag   ErrorTag = "ResourceLimitError"
 	SystemErrorTag          ErrorTag = "SystemError"
 	TypeErrorTag            ErrorTag = "TypeError"
+	TimeoutErrorTag         ErrorTag = "TimeoutError"
 	UnhandledBranchErrorTag ErrorTag = "UnhandledBranchError"
 	ValueErrorTag           ErrorTag = "ValueError"
 	ZeroDivisionErrorTag    ErrorTag = "ZeroDivisionError"

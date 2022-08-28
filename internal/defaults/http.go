@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -198,7 +200,10 @@ func (c *httpClient) request(method, rawURL string, timeout float64, rawBody any
 	log.Println(method, u.String())
 	req, err := http.NewRequest(method, u.String(), reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("http.NewRequestWithContext: %w", err)
+		return nil, &types.Error{
+			Tag: types.SystemErrorTag,
+			Err: fmt.Errorf("http.NewRequestWithContext: %w", err),
+		}
 	}
 
 	err = c.setRequestHeaders(req.Header, rawHeaders, bodyFormat)
@@ -211,14 +216,45 @@ func (c *httpClient) request(method, rawURL string, timeout float64, rawBody any
 	}
 
 	if timeout != 0 {
+		if timeout > 1800 {
+			return nil, &types.Error{
+				Tag: types.ValueErrorTag,
+				Err: fmt.Errorf("timeout is up to 1800"),
+			}
+		}
 		ctx, cancel := context.WithTimeout(req.Context(), time.Duration(math.Floor(timeout*float64(time.Second))))
 		defer cancel()
 		req = req.WithContext(ctx)
 	}
 
+	var netErr net.Error
 	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http.DefaultClient.Do: %w", err)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, &types.Error{
+			Tag: types.TimeoutErrorTag,
+			Err: err,
+		}
+	} else if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return nil, &types.Error{
+				Tag: types.TimeoutErrorTag,
+				Err: err,
+			}
+		}
+		return nil, &types.Error{
+			Tag: types.ConnectionErrorTag,
+			Err: err,
+		}
+	} else if errors.Is(err, net.ErrClosed) {
+		return nil, &types.Error{
+			Tag: types.ConnectionErrorTag,
+			Err: err,
+		}
+	} else if err != nil {
+		return nil, &types.Error{
+			Tag: types.SystemErrorTag,
+			Err: fmt.Errorf("http.DefaultClient.Do: %w", err),
+		}
 	}
 	defer res.Body.Close()
 
@@ -231,17 +267,23 @@ func (c *httpClient) request(method, rawURL string, timeout float64, rawBody any
 	}
 
 	var resBody any
-	if isJSON {
-		err = json.NewDecoder(res.Body).Decode(&resBody)
-		if err != nil {
-			return nil, fmt.Errorf("json.Decode: %w", err)
-		}
-	} else {
+	{
 		b, err := io.ReadAll(res.Body)
 		if err != nil {
-			return nil, fmt.Errorf("io.ReadAll: %w", err)
+			return nil, &types.Error{
+				Tag: types.ConnectionErrorTag,
+				Err: fmt.Errorf("io.ReadAll: %w", err),
+			}
 		}
-		resBody = b
+		if isJSON {
+			err := json.Unmarshal(b, &resBody)
+			if err != nil {
+				resBody = nil
+			}
+		}
+		if resBody == nil {
+			resBody = b
+		}
 	}
 
 	resHeaders := map[string]any{}
@@ -249,11 +291,19 @@ func (c *httpClient) request(method, rawURL string, timeout float64, rawBody any
 		resHeaders[name] = res.Header.Get(name)
 	}
 
-	return map[string]any{
+	resMap := map[string]any{
 		"code":    res.StatusCode,
 		"headers": resHeaders,
 		"body":    resBody,
-	}, nil
+	}
+	if res.StatusCode >= 400 {
+		return nil, &types.Error{
+			Tag:   types.HttpErrorTag,
+			Err:   fmt.Errorf("status code %d is returned", res.StatusCode),
+			Extra: resMap,
+		}
+	}
+	return resMap, nil
 }
 
 func (c *httpClient) detectBodyFormat(rawHeaders map[string]any) (bodyKind, error) {
@@ -264,12 +314,18 @@ func (c *httpClient) detectBodyFormat(rawHeaders map[string]any) (bodyKind, erro
 
 		value, ok := rawHeaders[name].(string)
 		if !ok {
-			return 0, fmt.Errorf("unsupported type for rawQuery value for name=%s: %T", name, value)
+			return 0, &types.Error{
+				Tag: types.TypeErrorTag,
+				Err: fmt.Errorf("unsupported type for rawQuery value for name=%s: %T", name, value),
+			}
 		}
 
 		mediaType, _, err := mime.ParseMediaType(value)
 		if err != nil {
-			return 0, fmt.Errorf("invalid Content-Type %q: %w", value, err)
+			return 0, &types.Error{
+				Tag: types.ValueErrorTag,
+				Err: fmt.Errorf("invalid Content-Type %q: %w", value, err),
+			}
 		}
 
 		if strings.HasSuffix(mediaType, "text/") {
@@ -281,7 +337,10 @@ func (c *httpClient) detectBodyFormat(rawHeaders map[string]any) (bodyKind, erro
 		} else if strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json") {
 			return jsonBody, nil
 		} else {
-			return 0, fmt.Errorf("unsupported Content-Type: %q", value)
+			return 0, &types.Error{
+				Tag: types.ValueErrorTag,
+				Err: fmt.Errorf("unsupported Content-Type: %q", value),
+			}
 		}
 	}
 
@@ -294,13 +353,19 @@ func (c *httpClient) createBodyReader(bodyFormat bodyKind, rawBody any) (io.Read
 		switch bodyFormat {
 		case queryFormBody:
 			if _, err := url.ParseQuery(body); err != nil {
-				return nil, fmt.Errorf("url.ParseQuery: %w", err)
+				return nil, &types.Error{
+					Tag: types.ValueErrorTag,
+					Err: fmt.Errorf("url.ParseQuery: %w", err),
+				}
 			}
 			fallthrough
 		case stringBody:
 			return strings.NewReader(body), nil
 		default:
-			return nil, fmt.Errorf("invalid body type with content-type: %T", rawBody)
+			return nil, &types.Error{
+				Tag: types.TypeErrorTag,
+				Err: fmt.Errorf("invalid body type with content-type: %T", rawBody),
+			}
 		}
 
 	case map[string]any:
@@ -308,23 +373,35 @@ func (c *httpClient) createBodyReader(bodyFormat bodyKind, rawBody any) (io.Read
 		case jsonBody:
 			b, err := json.Marshal(body)
 			if err != nil {
-				return nil, fmt.Errorf("json.Marshal: %w", err)
+				return nil, &types.Error{
+					Tag: types.ValueErrorTag,
+					Err: fmt.Errorf("json.Marshal: %w", err),
+				}
 			}
 
 			return bytes.NewReader(b), nil
 		default:
-			return nil, fmt.Errorf("invalid body type with content-type: %T", rawBody)
+			return nil, &types.Error{
+				Tag: types.TypeErrorTag,
+				Err: fmt.Errorf("invalid body type with content-type: %T", rawBody),
+			}
 		}
 
 	default:
-		return nil, fmt.Errorf("invalid body type with content-type: %T", rawBody)
+		return nil, &types.Error{
+			Tag: types.TypeErrorTag,
+			Err: fmt.Errorf("invalid body type with content-type: %T", rawBody),
+		}
 	}
 }
 
 func (c *httpClient) createURL(rawURL string, rawQuery map[string]any) (*url.URL, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("url.Parse: %w", err)
+		return nil, &types.Error{
+			Tag: types.ValueErrorTag,
+			Err: fmt.Errorf("url.Parse: %w", err),
+		}
 	}
 
 	if rawQuery != nil {
@@ -338,7 +415,10 @@ func (c *httpClient) createURL(rawURL string, rawQuery map[string]any) (*url.URL
 			case float64:
 				query.Set(name, strconv.FormatFloat(v, 'f', -1, 64))
 			default:
-				return nil, fmt.Errorf("unsupported type for query value for name=%s: %T", name, v)
+				return nil, &types.Error{
+					Tag: types.TypeErrorTag,
+					Err: fmt.Errorf("unsupported type for query value for name=%s: %T", name, v),
+				}
 			}
 		}
 		u.RawQuery = query.Encode()
@@ -357,7 +437,10 @@ func (c *httpClient) setRequestHeaders(header http.Header, rawHeaders map[string
 		case float64:
 			header.Set(field, strconv.FormatFloat(v, 'f', -1, 64))
 		default:
-			return fmt.Errorf("unsupported type for header value for field=%s: %T", field, v)
+			return &types.Error{
+				Tag: types.TypeErrorTag,
+				Err: fmt.Errorf("unsupported type for header value for field=%s: %T", field, v),
+			}
 		}
 	}
 	if _, ok := header[http.CanonicalHeaderKey("Content-Type")]; !ok {
@@ -380,7 +463,10 @@ func (c *httpClient) setAuthHeaders(u *url.URL, req *http.Request, auth map[stri
 
 	typ, ok := auth["type"].(string)
 	if !ok {
-		return fmt.Errorf("auth.type is required")
+		return &types.Error{
+			Tag: types.ValueErrorTag,
+			Err: fmt.Errorf("auth.type is required"),
+		}
 	}
 	switch typ {
 	case "OIDC":
@@ -390,7 +476,10 @@ func (c *httpClient) setAuthHeaders(u *url.URL, req *http.Request, auth map[stri
 		return c.setOAuth2Headers(req, auth)
 
 	default:
-		return fmt.Errorf("unknown auth.type: %s", typ)
+		return &types.Error{
+			Tag: types.ValueErrorTag,
+			Err: fmt.Errorf("unknown auth.type: %s", typ),
+		}
 	}
 }
 
@@ -415,7 +504,10 @@ func (c *httpClient) setOIDCAuthHeaders(u *url.URL, req *http.Request, auth map[
 		if !ok {
 			ts, err = idtoken.NewTokenSource(context.Background(), audience)
 			if err != nil {
-				return fmt.Errorf("idtoken.NewTokenSource: %w", err)
+				return &types.Error{
+					Tag: types.AuthErrorTag,
+					Err: fmt.Errorf("idtoken.NewTokenSource: %w", err),
+				}
 			}
 			c.oidcTokenSourceCache[audience] = ts
 		}
@@ -423,7 +515,10 @@ func (c *httpClient) setOIDCAuthHeaders(u *url.URL, req *http.Request, auth map[
 
 	token, err := ts.Token()
 	if err != nil {
-		return fmt.Errorf("ts.Token: %w", err)
+		return &types.Error{
+			Tag: types.AuthErrorTag,
+			Err: fmt.Errorf("ts.Token: %w", err),
+		}
 	}
 
 	token.SetAuthHeader(req)
@@ -443,7 +538,10 @@ func (c *httpClient) setOAuth2Headers(req *http.Request, auth map[string]any) er
 			continue
 		}
 		if scopes != nil {
-			return fmt.Errorf("cannot set scope and scopes both")
+			return &types.Error{
+				Tag: types.ValueErrorTag,
+				Err: fmt.Errorf("cannot set scope and scopes both"),
+			}
 		}
 
 		switch vv := v.(type) {
@@ -467,12 +565,18 @@ func (c *httpClient) setOAuth2Headers(req *http.Request, auth map[string]any) er
 				if s, ok := vvv.(string); ok {
 					scopes = append(scopes, s)
 				} else {
-					return fmt.Errorf("invalid auth.%s[%d] type: %T", key, i, v)
+					return &types.Error{
+						Tag: types.ValueErrorTag,
+						Err: fmt.Errorf("invalid auth.%s[%d] type: %T", key, i, v),
+					}
 				}
 			}
 
 		default:
-			return fmt.Errorf("invalid auth.%s type: %T", key, v)
+			return &types.Error{
+				Tag: types.TypeErrorTag,
+				Err: fmt.Errorf("invalid auth.%s type: %T", key, v),
+			}
 		}
 	}
 
@@ -482,7 +586,10 @@ func (c *httpClient) setOAuth2Headers(req *http.Request, auth map[string]any) er
 	if !ok {
 		creds, err := transport.Creds(context.Background(), option.WithScopes(scopes...))
 		if err != nil {
-			return fmt.Errorf("transport.Creds: %w", err)
+			return &types.Error{
+				Tag: types.AuthErrorTag,
+				Err: fmt.Errorf("transport.Creds: %w", err),
+			}
 		}
 
 		ts = creds.TokenSource
@@ -490,7 +597,10 @@ func (c *httpClient) setOAuth2Headers(req *http.Request, auth map[string]any) er
 
 	token, err := ts.Token()
 	if err != nil {
-		return fmt.Errorf("ts.Token: %w", err)
+		return &types.Error{
+			Tag: types.AuthErrorTag,
+			Err: fmt.Errorf("ts.Token: %w", err),
+		}
 	}
 
 	token.SetAuthHeader(req)

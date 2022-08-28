@@ -26,6 +26,6 @@ main:
     - forth:
         call: sys.log
         args:
-          data: '${base64.encode(bar, false)}'
+          data: '${base64.encode(text.encode(bar), false)}'
     - final:
         raise: '${baz[3]}'
