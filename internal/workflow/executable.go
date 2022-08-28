@@ -364,13 +364,17 @@ func newCallStep(def anonymousStepDef) (*callStep, error) {
 	}
 
 	var args any
-	err = unmarshalJSONUseNumber(def["args"], &args)
-	if err != nil {
-		return nil, fmt.Errorf("invalid args %q", string(def["args"]))
-	}
-	args, err = decodeJSONNumberRecursive(args)
-	if err != nil {
-		return nil, fmt.Errorf("invalid number in args %q", string(def["args"]))
+	if argsDef, ok := def["args"]; ok {
+		err = unmarshalJSONUseNumber(argsDef, &args)
+		if err != nil {
+			return nil, fmt.Errorf("invalid args %q", string(argsDef))
+		}
+		args, err = decodeJSONNumberRecursive(args)
+		if err != nil {
+			return nil, fmt.Errorf("invalid number in args %q", string(argsDef))
+		}
+	} else {
+		args = []any{}
 	}
 
 	callExpr, err := expression.ParseExpr(call)

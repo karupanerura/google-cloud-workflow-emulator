@@ -170,7 +170,7 @@ func (def anonymousStepDef) compile() (AnonymousStep, error) {
 		return nil, fmt.Errorf("conflict return and raise")
 	}
 
-	if found["call"] && found["args"] {
+	if found["call"] {
 		return newCallStep(def)
 	} else if found["switch"] {
 		return newSwitchStep(def)
