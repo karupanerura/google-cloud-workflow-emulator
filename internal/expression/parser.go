@@ -156,7 +156,7 @@ func (p *parser) constructAST(lex *lexer, minBP uint8) (*ast, error) {
 
 				left = &ast{list: []*ast{{atom: tok}, sExpr}}
 			} else {
-				sExpr, err := p.constructAST(lex, bp)
+				sExpr, err := p.constructAST(lex, bp+1)
 				if errors.Is(err, io.EOF) {
 					// ok: ignore it
 				} else if err != nil {
@@ -190,8 +190,11 @@ func (p *parser) constructAST(lex *lexer, minBP uint8) (*ast, error) {
 
 		if _, isOP := tok.(operatorToken); isOP {
 			op := p.extractLiteralString(tok)
+			if p.debug {
+				log.Println("OP", minBP, op, p.renderAST(left))
+			}
 			if bp, isInfixOP := infixOperatorBindingPowerMap[op]; isInfixOP {
-				if op != "," && bp <= minBP {
+				if bp < minBP {
 					lex.push(tok)
 					return left, nil
 				}
@@ -199,7 +202,7 @@ func (p *parser) constructAST(lex *lexer, minBP uint8) (*ast, error) {
 					log.Println("third op token: ", p.extractLiteralString(tok))
 				}
 
-				sExpr, err := p.constructAST(lex, bp)
+				sExpr, err := p.constructAST(lex, bp+1)
 				if errors.Is(err, io.EOF) {
 					// ok: ignore it
 				} else if err != nil {
@@ -213,7 +216,7 @@ func (p *parser) constructAST(lex *lexer, minBP uint8) (*ast, error) {
 				continue
 			} else if closeOP, isLeftParen := parenthesisPairMap[op]; isLeftParen {
 				bp := prefixOperatorBindingPowerMap[op]
-				if bp <= minBP {
+				if bp < minBP {
 					lex.push(tok)
 					return left, nil
 				}

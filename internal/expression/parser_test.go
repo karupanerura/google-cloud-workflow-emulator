@@ -765,6 +765,34 @@ func TestParseExpr(t *testing.T) {
 			source:   `a.b(1, a.b(2, 3)) * 3`,
 			expected: int64(18),
 		},
+		{
+			symbols: &types.SymbolTable{
+				Symbols: map[string]any{
+					"v": map[string]any{
+						"z": int64(0),
+					},
+					"a": map[string]any{
+						"b": function(func(args []any) (any, error) {
+							if len(args) != 2 {
+								return nil, fmt.Errorf("needs a 2 argument but got: %d", len(args))
+							}
+
+							var s int64 = 0
+							for _, arg := range args {
+								n, ok := arg.(int64)
+								if !ok {
+									return nil, fmt.Errorf("needs int64 argument but got: %v", arg)
+								}
+								s += n
+							}
+							return s, nil
+						}),
+					},
+				},
+			},
+			source:   `a.b(1, a.b(a.b(v.z, 2), a.b(3, v.z))) * 3`,
+			expected: int64(18),
+		},
 	} {
 		tt := tt
 		t.Run(tt.source, func(t *testing.T) {
