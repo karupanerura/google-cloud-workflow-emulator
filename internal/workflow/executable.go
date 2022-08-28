@@ -119,15 +119,15 @@ func (s *namedStep) Name() StepName {
 }
 
 func (s *namedStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
-	ret, nextStep, err := s.step.Execute(ev)
+	ret, next, err := s.step.Execute(ev)
 	if err != nil {
 		return nil, "", err
 	}
 
-	if nextStep == "" {
-		nextStep = s.next
+	if next == "" {
+		next = s.next
 	}
-	return ret, nextStep, nil
+	return ret, next, nil
 }
 
 type assignStep struct {
@@ -216,6 +216,26 @@ func (s *assignStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 		variable.Set(value)
 	}
 	return nil, "", nil
+}
+
+type nopStep struct{}
+
+func (nopStep) Execute(*expression.Evaluator) (any, StepName, error) {
+	return nil, "", nil
+}
+
+type nextStep struct {
+	step AnonymousStep
+	next StepName
+}
+
+func (s *nextStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
+	ret, _, err := s.step.Execute(ev)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return ret, s.next, nil
 }
 
 type returnStep struct {

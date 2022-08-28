@@ -129,13 +129,6 @@ func (d *workflowStepDef) compile(defaultNextStepName StepName) (Step, error) {
 	}
 
 	nextStep := defaultNextStepName
-	if nextJSON, ok := d.stepDef["next"]; ok {
-		if err := json.Unmarshal(nextJSON, &nextStep); err != nil {
-			return nil, fmt.Errorf("invalid next: %w", err)
-		}
-		delete(d.stepDef, "next")
-	}
-
 	anonStep, err := d.stepDef.compile()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", d.name, err)
@@ -153,6 +146,29 @@ type anonymousStepDef map[string]json.RawMessage
 var firstLevelFieldsOfStep = []string{"call", "args", "try", "retry", "except", "for", "parallel", "assign", "steps", "raise", "switch", "result", "next", "return"}
 
 func (def anonymousStepDef) compile() (AnonymousStep, error) {
+	if nextJSON, ok := def["next"]; ok {
+		var next StepName
+		if err := json.Unmarshal(nextJSON, &next); err != nil {
+			return nil, fmt.Errorf("invalid next: %w", err)
+		}
+		delete(def, "next")
+		if len(def) == 0 {
+			return &nextStep{
+				step: nopStep{},
+				next: next,
+			}, nil
+		}
+
+		step, err := def.compile()
+		if err != nil {
+			return nil, err
+		}
+		return &nextStep{
+			step: step,
+			next: next,
+		}, nil
+	}
+
 	found := map[string]bool{}
 	for _, name := range firstLevelFieldsOfStep {
 		if _, ok := def[name]; ok {
