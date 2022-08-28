@@ -110,4 +110,36 @@ var ExpressionHelpers = aggregateFunctionsToReadonlySymbolTable(
 			}
 		}
 	}),
+	types.MustNewFunction("default", []types.Argument{
+		{Name: "val"},
+		{Name: "defaultVal"},
+	}, func(val, defaultVal any) (any, error) {
+		if val != nil {
+			return val, nil
+		}
+		return defaultVal, nil
+	}),
+	types.MustNewFunction("if", []types.Argument{
+		{Name: "condition"},
+		{Name: "ifTrue"},
+		{Name: "ifFalse"},
+	}, func(condAny any, ifTrue, ifFalse any) (any, error) {
+		if condAny == nil {
+			return ifFalse, nil
+		}
+
+		cond, ok := condAny.(bool)
+		if !ok {
+			return nil, &types.Error{
+				Tag: types.TypeErrorTag,
+				Err: fmt.Errorf("condition must be boolean or null"),
+			}
+		}
+
+		if cond {
+			return ifTrue, nil
+		} else {
+			return ifFalse, nil
+		}
+	}),
 )
