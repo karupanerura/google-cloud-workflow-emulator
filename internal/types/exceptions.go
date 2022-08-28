@@ -90,7 +90,7 @@ func (e *Error) Unwrap() error {
 }
 
 func (e *Error) Exception() any {
-	tags := []any{e.Tag}
+	tags := []any{}
 	for err := error(e); err != nil; err = errors.Unwrap(err) {
 		if e, ok := err.(*Error); ok {
 			tags = append(tags, e.Tag)
