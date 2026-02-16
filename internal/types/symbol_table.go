@@ -70,7 +70,10 @@ func (st *SymbolTable) set(key string, value any) bool {
 
 func (st *SymbolTable) KeysChan() <-chan string {
 	ch := make(chan string)
-	go st.keysChan(ch)
+	go func() {
+		st.keysChan(ch)
+		close(ch)
+	}()
 	return ch
 }
 

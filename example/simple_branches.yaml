@@ -1,0 +1,21 @@
+---
+main:
+  params: [args]
+  steps:
+    - simple_parallel:
+        parallel:
+          branches:
+            - branch1:
+                steps:
+                  - log1:
+                      call: sys.log
+                      args:
+                        data: "Branch 1"
+            - branch2:
+                steps:
+                  - log2:
+                      call: sys.log
+                      args:
+                        data: "Branch 2"
+    - final:
+        return: "done"

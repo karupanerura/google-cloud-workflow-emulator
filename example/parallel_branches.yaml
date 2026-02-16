@@ -1,0 +1,44 @@
+---
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - results: {}
+    - parallel_branches_example:
+        parallel:
+          shared: [results]
+          branches:
+            - branch1:
+                steps:
+                  - log_branch1:
+                      call: sys.log
+                      args:
+                        data: "Branch 1 executing"
+                  - assign_branch1:
+                      assign:
+                        - results.branch1: "Branch 1 completed"
+            - branch2:
+                steps:
+                  - log_branch2:
+                      call: sys.log
+                      args:
+                        data: "Branch 2 executing"
+                  - assign_branch2:
+                      assign:
+                        - results.branch2: "Branch 2 completed"
+            - branch3:
+                steps:
+                  - log_branch3:
+                      call: sys.log
+                      args:
+                        data: "Branch 3 executing"
+                  - assign_branch3:
+                      assign:
+                        - results.branch3: "Branch 3 completed"
+    - log_results:
+        call: sys.log
+        args:
+          data: ${results}
+    - return_results:
+        return: ${results}
