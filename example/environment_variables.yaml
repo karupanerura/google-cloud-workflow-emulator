@@ -1,0 +1,13 @@
+---
+main:
+  params: [args]
+  steps:
+    - get_env:
+        assign:
+          - test_var: ${sys.get_env("TEST_VAR", "default_value")}
+    - log_env:
+        call: sys.log
+        args:
+          data: ${test_var}
+    - return_result:
+        return: ${test_var}

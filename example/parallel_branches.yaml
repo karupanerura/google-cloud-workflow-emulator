@@ -1,0 +1,45 @@
+---
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - counter: 0
+    - parallel_branches_example:
+        parallel:
+          shared: [counter]
+          branches:
+            - branch1:
+                steps:
+                  - log_branch1:
+                      call: sys.log
+                      args:
+                        data: "Branch 1 executing"
+                  - increment1:
+                      assign:
+                        - counter: ${counter + 1}
+            - branch2:
+                steps:
+                  - log_branch2:
+                      call: sys.log
+                      args:
+                        data: "Branch 2 executing"
+                  - increment2:
+                      assign:
+                        - counter: ${counter + 10}
+            - branch3:
+                steps:
+                  - log_branch3:
+                      call: sys.log
+                      args:
+                        data: "Branch 3 executing"
+                  - increment3:
+                      assign:
+                        - counter: ${counter + 100}
+    - log_results:
+        call: sys.log
+        args:
+          data: ${counter}
+    - return_results:
+        return: ${counter}
+

@@ -204,7 +204,7 @@ func (s *assignStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 		}
 		if inheritedVariables != nil {
 			rootSym, _ := variable.Paths()
-			if _, inherited := inheritedVariables.Shared[rootSym]; inherited {
+			if shared, exists := inheritedVariables.Shared[rootSym]; exists && !shared {
 				return nil, "", fmt.Errorf("invalid assign[%d]: cannot assign to non-shared variable in parallel step", i)
 			}
 		}
@@ -1099,6 +1099,157 @@ func (w *forStepsWorkflow) execute(symbolTable *types.SymbolTable) (forStepLoopC
 	return continueForStepLoopControl, nil
 }
 
+func newBranchesStep(def map[string]json.RawMessage, parallel *parallelPolicy) (*branchesStep, error) {
+	type branchDef struct {
+		Steps []*workflowStepDef `json:"steps"`
+	}
+
+	var branchesDef []map[string]*branchDef
+	if err := json.Unmarshal(def["branches"], &branchesDef); err != nil {
+		return nil, fmt.Errorf("invalid branches: %w", err)
+	}
+
+	if len(branchesDef) == 0 {
+		return nil, fmt.Errorf("branches: must have at least one branch")
+	}
+
+	branches := make(map[string]*branchWorkflow, len(branchesDef))
+	for i, branchDefMap := range branchesDef {
+		if len(branchDefMap) != 1 {
+			return nil, fmt.Errorf("branches[%d]: must have exactly one branch name", i)
+		}
+
+		for branchName, branch := range branchDefMap {
+			if _, duplicated := branches[branchName]; duplicated {
+				return nil, fmt.Errorf("branches: duplicated branch name: %s", branchName)
+			}
+
+			// parse steps
+			wf := &branchWorkflow{
+				name:    branchName,
+				stepMap: make(map[StepName]Step, len(branch.Steps)),
+			}
+			for j, stepDef := range branch.Steps {
+				if _, duplicated := wf.stepMap[stepDef.name]; duplicated {
+					return nil, fmt.Errorf("%s: duplicated step name in branch %s", stepDef.name, branchName)
+				}
+
+				var defaultNextStepName StepName
+				if j == len(branch.Steps)-1 {
+					defaultNextStepName = "end"
+				} else {
+					defaultNextStepName = branch.Steps[j+1].name
+				}
+
+				var err error
+				wf.stepMap[stepDef.name], err = stepDef.compile(defaultNextStepName)
+				if err != nil {
+					return nil, fmt.Errorf("%s in branch %s: %w", stepDef.name, branchName, err)
+				}
+
+				if wf.entryStep == nil {
+					wf.entryStep = wf.stepMap[stepDef.name]
+				}
+			}
+
+			branches[branchName] = wf
+		}
+	}
+
+	return &branchesStep{
+		branches: branches,
+		parallel: parallel,
+	}, nil
+}
+
+type branchesStep struct {
+	branches map[string]*branchWorkflow
+	parallel *parallelPolicy
+}
+
+func (s *branchesStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
+	symbolTable := ev.SymbolTable
+	
+	// Only setup shared variables if they are specified
+	if len(s.parallel.shared) > 0 {
+		symbolTable = ev.SymbolTable.ShallowClone()
+		inheritedVariables := &types.InternalInheritedVariables{
+			Shared: make(map[string]bool, len(symbolTable.Symbols)),
+		}
+		for key := range symbolTable.KeysChan() {
+			inheritedVariables.Shared[key] = false
+		}
+		for i, shared := range s.parallel.shared {
+			ref, err := ev.ResolveReference(shared)
+			if err != nil {
+				return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
+			}
+
+			v, err := ref.ResolveVariable(symbolTable)
+			if err != nil {
+				return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
+			}
+
+			value := v.Get()
+			v.Set(&types.SharedVariable{Value: value})
+
+			root, _ := v.Paths()
+			inheritedVariables.Shared[root] = true
+		}
+		symbolTable.Symbols[types.InternalInheritedVariablesSymbol] = inheritedVariables
+	}
+
+	eg := errgroup.Group{}
+	for _, branch := range s.branches {
+		branch := branch
+		eg.Go(func() error {
+			branchSymbolTable := &types.SymbolTable{
+				Symbols: map[string]any{},
+				Parent:  symbolTable,
+			}
+
+			_, err := branch.execute(branchSymbolTable)
+			if err != nil {
+				return fmt.Errorf("branch %s: %w", branch.name, err)
+			}
+
+			return nil
+		})
+	}
+	return nil, "", eg.Wait()
+}
+
+type branchWorkflow struct {
+	name      string
+	entryStep Step
+	stepMap   map[StepName]Step
+}
+
+func (w *branchWorkflow) execute(symbolTable *types.SymbolTable) (any, error) {
+	ev := expression.Evaluator{SymbolTable: symbolTable}
+	step := w.entryStep
+	for step != nil {
+		ret, nextStepName, err := step.Execute(&ev)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", step.Name(), err)
+		}
+		if nextStepName == "end" {
+			return ret, nil
+		} else if nextStepName == "" {
+			return nil, fmt.Errorf("%s: next step is not defined", step.Name())
+		}
+
+		nextStep, ok := w.stepMap[nextStepName]
+		if !ok {
+			return nil, fmt.Errorf("%s: not found", nextStepName)
+		}
+
+		step = nextStep
+	}
+
+	return nil, nil
+}
+
 func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
 	var parallelDef map[string]json.RawMessage
 	if err := json.Unmarshal(def["parallel"], &parallelDef); err != nil {
@@ -1116,8 +1267,10 @@ func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
 	}
 
 	var sharedDef []string
-	if err := json.Unmarshal(parallelDef["shared"], &sharedDef); err != nil {
-		return nil, fmt.Errorf("parallel: invalid shared: %w", err)
+	if parallelDef["shared"] != nil {
+		if err := json.Unmarshal(parallelDef["shared"], &sharedDef); err != nil {
+			return nil, fmt.Errorf("parallel: invalid shared: %w", err)
+		}
 	}
 
 	shared := make([]*expression.Expr, len(sharedDef))
@@ -1147,7 +1300,11 @@ func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
 			return nil, fmt.Errorf("parallel: %w", err)
 		}
 	} else if parallelDef["branches"] != nil {
-		panic("TODO")
+		var err error
+		step, err = newBranchesStep(parallelDef, policy)
+		if err != nil {
+			return nil, fmt.Errorf("parallel: %w", err)
+		}
 	} else {
 		return nil, fmt.Errorf("parallel: must specify `for` or `branches`")
 	}
