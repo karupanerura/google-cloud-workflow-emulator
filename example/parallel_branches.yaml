@@ -4,10 +4,10 @@ main:
   steps:
     - init:
         assign:
-          - results: {}
+          - counter: 0
     - parallel_branches_example:
         parallel:
-          shared: [results]
+          shared: [counter]
           branches:
             - branch1:
                 steps:
@@ -15,30 +15,31 @@ main:
                       call: sys.log
                       args:
                         data: "Branch 1 executing"
-                  - assign_branch1:
+                  - increment1:
                       assign:
-                        - results.branch1: "Branch 1 completed"
+                        - counter: ${counter + 1}
             - branch2:
                 steps:
                   - log_branch2:
                       call: sys.log
                       args:
                         data: "Branch 2 executing"
-                  - assign_branch2:
+                  - increment2:
                       assign:
-                        - results.branch2: "Branch 2 completed"
+                        - counter: ${counter + 10}
             - branch3:
                 steps:
                   - log_branch3:
                       call: sys.log
                       args:
                         data: "Branch 3 executing"
-                  - assign_branch3:
+                  - increment3:
                       assign:
-                        - results.branch3: "Branch 3 completed"
+                        - counter: ${counter + 100}
     - log_results:
         call: sys.log
         args:
-          data: ${results}
+          data: ${counter}
     - return_results:
-        return: ${results}
+        return: ${counter}
+
