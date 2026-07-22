@@ -86,9 +86,11 @@ func (r *symbolReference) ResolveVariable(st *types.SymbolTable) (Variable, erro
 				getter: func() any {
 					vv.RLock()
 					defer vv.RUnlock()
-					return vv.Value
+					return types.DeepCopyValue(vv.Value)
 				},
 				setter: func(value any) {
+					vv.Lock()
+					defer vv.Unlock()
 					vv.Value = value
 				},
 			}, nil
@@ -221,7 +223,7 @@ func (r *fieldReference) ResolveValue(st *types.SymbolTable) (Value, error) {
 				root, paths := contextRef.Paths()
 				return root, append(paths, r.name)
 			},
-			body: v.Value,
+			body: types.DeepCopyValue(v.Value),
 		}, nil
 	}
 	return &pureValue{

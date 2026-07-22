@@ -70,7 +70,10 @@ func (st *SymbolTable) set(key string, value any) bool {
 
 func (st *SymbolTable) KeysChan() <-chan string {
 	ch := make(chan string)
-	go st.keysChan(ch)
+	go func() {
+		st.keysChan(ch)
+		close(ch)
+	}()
 	return ch
 }
 
@@ -88,5 +91,26 @@ func (st *SymbolTable) ShallowClone() *SymbolTable {
 		Symbols:  lo.Assign(map[string]any{}, st.Symbols),
 		ReadOnly: st.ReadOnly,
 		Parent:   st.Parent,
+	}
+}
+
+// DeepCopyValue copies maps and lists recursively so that the returned value
+// shares no mutable state with v. Scalars and other values are returned as-is.
+func DeepCopyValue(v any) any {
+	switch vv := v.(type) {
+	case map[string]any:
+		copied := make(map[string]any, len(vv))
+		for key, value := range vv {
+			copied[key] = DeepCopyValue(value)
+		}
+		return copied
+	case []any:
+		copied := make([]any, len(vv))
+		for i, value := range vv {
+			copied[i] = DeepCopyValue(value)
+		}
+		return copied
+	default:
+		return v
 	}
 }

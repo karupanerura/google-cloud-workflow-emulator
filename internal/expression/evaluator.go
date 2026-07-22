@@ -2,6 +2,7 @@ package expression
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/karupanerura/google-cloud-workflow-emulator/internal/types"
 )
@@ -106,41 +107,59 @@ func (e *Evaluator) ResolveReferenceRecursive(value any) (any, error) {
 	}
 }
 
-func (e *Evaluator) LockSharedVariablesIfNeeded(exprs ...*Expr) (func(), error) {
+// LockSharedVariablesIfNeeded locks every shared variable statically referenced
+// by the given values (each value may be an *Expr or a map/list containing them)
+// for the duration of the current step. It must be called with the step's whole
+// expression footprint (assignment targets and the expressions they read), so
+// that a step never blocks on a shared variable while holding another one:
+// all locks are acquired upfront in a single global (name-sorted) order.
+//
+// While a lock is held, a copy of the shared variable's value is installed into
+// the evaluator's own (goroutine-local) symbol table leaf so that every read and
+// write within the step resolves locally without touching the lock again
+// (sync.RWMutex is not reentrant). The returned unlock function publishes the
+// leaf value back into the shared variable, removes the local entry, and
+// releases the locks in reverse order. Callers must defer it so the value is
+// published even when the step fails halfway.
+func (e *Evaluator) LockSharedVariablesIfNeeded(values ...any) (func(), error) {
 	inheritedVariablesAny, ok := e.SymbolTable.Get(types.InternalInheritedVariablesSymbol)
 	if !ok {
 		return func() {}, nil
 	}
 	inheritedVariables := inheritedVariablesAny.(*types.InternalInheritedVariables)
 
-	unlockers := make([]func(), 0, len(exprs))
-	for _, expr := range exprs {
-		ref, err := e.ResolveReference(expr)
-		if err != nil {
-			return nil, err
+	symbolSet := map[string]struct{}{}
+	collectReferencedSymbolsRecursive(symbolSet, values...)
+
+	roots := make([]string, 0, len(symbolSet))
+	for sym := range symbolSet {
+		if inheritedVariables.Shared[sym] {
+			roots = append(roots, sym)
+		}
+	}
+	sort.Strings(roots)
+
+	unlockers := make([]func(), 0, len(roots))
+	for _, root := range roots {
+		v, ok := e.SymbolTable.Get(root)
+		if !ok {
+			continue
+		}
+		sharedVar, isShared := v.(*types.SharedVariable)
+		if !isShared {
+			// the name resolves to a goroutine-local variable that shadows the
+			// shared one (e.g. a loop value variable), so no locking is needed
+			continue
 		}
 
-		variable, err := ref.ResolveVariable(e.SymbolTable)
-		if err != nil {
-			return nil, err
-		}
-
-		rootSym, _ := variable.Paths()
-		if inheritedVariables.Shared[rootSym] {
-			v, ok := e.SymbolTable.Get(rootSym)
-			if !ok {
-				panic(fmt.Sprintf("assertion failure: not found shared variable=%q", rootSym))
-			}
-
-			sharedVar := v.(*types.SharedVariable)
-			sharedVar.Lock()
-			e.SymbolTable.Set(rootSym, sharedVar.Value)
-			unlockers = append(unlockers, func() {
-				sharedVar.Value, _ = e.SymbolTable.Get(rootSym)
-				e.SymbolTable.Set(rootSym, sharedVar)
-				sharedVar.Unlock()
-			})
-		}
+		root := root
+		sharedVar.Lock()
+		e.SymbolTable.Symbols[root] = types.DeepCopyValue(sharedVar.Value)
+		unlockers = append(unlockers, func() {
+			sharedVar.Value = e.SymbolTable.Symbols[root]
+			delete(e.SymbolTable.Symbols, root)
+			sharedVar.Unlock()
+		})
 	}
 	if len(unlockers) == 0 {
 		return func() {}, nil
@@ -154,4 +173,21 @@ func (e *Evaluator) LockSharedVariablesIfNeeded(exprs ...*Expr) (func(), error) 
 			unlockers[len(unlockers)-i-1]() // unlock by reversed order
 		}
 	}, nil
+}
+
+func collectReferencedSymbolsRecursive(set map[string]struct{}, values ...any) {
+	for _, value := range values {
+		switch v := value.(type) {
+		case *Expr:
+			v.AppendReferencedSymbols(set)
+		case map[string]any:
+			for _, value := range v {
+				collectReferencedSymbolsRecursive(set, value)
+			}
+		case []any:
+			for _, value := range v {
+				collectReferencedSymbolsRecursive(set, value)
+			}
+		}
+	}
 }
