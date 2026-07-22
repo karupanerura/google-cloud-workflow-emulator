@@ -182,11 +182,15 @@ func (s *assignStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 	if v, ok := ev.SymbolTable.Get(types.InternalInheritedVariablesSymbol); ok {
 		inheritedVariables = v.(*types.InternalInheritedVariables)
 
-		exprs := lo.Map(s.assigns, func(assign assignOperation, _ int) *expression.Expr {
-			return assign.left
-		})
+		// lock the whole footprint of the step upfront: both assignment targets
+		// and the expressions they read, so two branches with crossing
+		// read/write sets cannot deadlock each other
+		lockTargets := make([]any, 0, 2*len(s.assigns))
+		for _, assign := range s.assigns {
+			lockTargets = append(lockTargets, assign.left, assign.right)
+		}
 
-		unlock, err := ev.LockSharedVariablesIfNeeded(exprs...)
+		unlock, err := ev.LockSharedVariablesIfNeeded(lockTargets...)
 		if err != nil {
 			return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
 		}
@@ -334,38 +338,64 @@ func (s *raiseStep) raise(ev *expression.Evaluator, value any) (any, StepName, e
 }
 
 type anonymousStepsStep struct {
-	steps []AnonymousStep
+	entryStep Step
+	stepMap   map[StepName]Step
 }
 
 func newAnonymousStepsStep(def anonymousStepDef) (*anonymousStepsStep, error) {
-	var stepsDef []anonymousStepDef
-	err := json.Unmarshal(def["steps"], stepsDef)
+	var stepsDef []*workflowStepDef
+	err := json.Unmarshal(def["steps"], &stepsDef)
 	if err != nil {
 		return nil, fmt.Errorf("invalid steps: %w", err)
 	}
 
-	steps := make([]AnonymousStep, len(stepsDef))
+	s := &anonymousStepsStep{
+		stepMap: make(map[StepName]Step, len(stepsDef)),
+	}
 	for i, stepDef := range stepsDef {
-		steps[i], err = stepDef.compile()
+		if _, duplicated := s.stepMap[stepDef.name]; duplicated {
+			return nil, fmt.Errorf("%s: duplicated step name in steps", stepDef.name)
+		}
+
+		// the last step keeps an empty default so that falling off the end of
+		// the block hands control back to the enclosing step
+		var defaultNextStepName StepName
+		if i != len(stepsDef)-1 {
+			defaultNextStepName = stepsDef[i+1].name
+		}
+
+		s.stepMap[stepDef.name], err = stepDef.compile(defaultNextStepName)
 		if err != nil {
 			return nil, fmt.Errorf("invalid steps[%d]: %w", i, err)
 		}
+
+		if s.entryStep == nil {
+			s.entryStep = s.stepMap[stepDef.name]
+		}
 	}
 
-	return &anonymousStepsStep{
-		steps: steps,
-	}, nil
+	return s, nil
 }
 
 func (s *anonymousStepsStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
-	for i, step := range s.steps {
-		ret, nextStep, err := step.Execute(ev)
+	step := s.entryStep
+	for step != nil {
+		ret, nextStepName, err := step.Execute(ev)
 		if err != nil {
-			return nil, "", fmt.Errorf("invalid condition[%d]: %w", i, err)
+			return nil, "", fmt.Errorf("%s: %w", step.Name(), err)
 		}
-		if nextStep != "" {
-			return ret, nextStep, nil
+		if nextStepName == "" {
+			return ret, "", nil
 		}
+
+		if nextStep, ok := s.stepMap[nextStepName]; ok {
+			step = nextStep
+			continue
+		}
+
+		// a jump out of this block (including end/break/continue) is resolved
+		// by the enclosing step
+		return ret, nextStepName, nil
 	}
 	return nil, "", nil
 }
@@ -441,12 +471,16 @@ func newCallStep(def anonymousStepDef) (*callStep, error) {
 }
 
 func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
-	if _, ok := ev.SymbolTable.Get(types.InternalInheritedVariablesSymbol); ok && s.result != nil {
-		unlock, err := ev.LockSharedVariablesIfNeeded(s.result)
-		if err != nil {
-			return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
+	var inheritedVariables *types.InternalInheritedVariables
+	if v, ok := ev.SymbolTable.Get(types.InternalInheritedVariablesSymbol); ok {
+		inheritedVariables = v.(*types.InternalInheritedVariables)
+		if s.result != nil {
+			unlock, err := ev.LockSharedVariablesIfNeeded(s.result, s.args)
+			if err != nil {
+				return nil, "", fmt.Errorf("LockSharedVariablesIfNeeded: %w", err)
+			}
+			defer unlock()
 		}
-		defer unlock()
 	}
 
 	callRef, err := ev.ResolveReference(s.call)
@@ -494,6 +528,12 @@ func (s *callStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
 		variable, err = resultRef.ResolveVariable(ev.SymbolTable)
 		if err != nil {
 			return nil, "", fmt.Errorf("unknown result %q: %w", s.call.Source, err)
+		}
+		if inheritedVariables != nil {
+			rootSym, _ := variable.Paths()
+			if shared, exists := inheritedVariables.Shared[rootSym]; exists && !shared {
+				return nil, "", fmt.Errorf("invalid result: cannot assign call result to non-shared variable in parallel step")
+			}
 		}
 	}
 
@@ -905,6 +945,14 @@ func newForStep(def anonymousStepDef, parallel *parallelPolicy) (*forStep, error
 		return nil, fmt.Errorf("invalid for.in: must be an array or expression")
 	}
 
+	if parallel != nil {
+		for i, shared := range parallel.shared {
+			if name, ok := shared.SymbolName(); ok && name == decoded.Value {
+				return nil, fmt.Errorf("invalid shared[%d]: loop value variable %q cannot be shared", i, name)
+			}
+		}
+	}
+
 	// parse steps
 	wf := &forStepsWorkflow{
 		stepMap: make(map[StepName]Step, len(decoded.Steps)),
@@ -925,6 +973,9 @@ func newForStep(def anonymousStepDef, parallel *parallelPolicy) (*forStep, error
 		wf.stepMap[stepDef.name], err = stepDef.compile(defaultNextStepName)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", stepDef.name, err)
+		}
+		if parallel != nil && findReturnStep(wf.stepMap[stepDef.name]) {
+			return nil, fmt.Errorf("%s: return is not allowed in a parallel iteration", stepDef.name)
 		}
 
 		if wf.entryStep == nil {
@@ -976,13 +1027,15 @@ func (s *forStep) executeInSerial(ev *expression.Evaluator) (any, StepName, erro
 			Parent: ev.SymbolTable,
 		}
 
-		ctrl, err := s.workflow.execute(symbolTable)
+		ctrl, ret, err := s.workflow.execute(symbolTable)
 		if err != nil {
 			return nil, "", fmt.Errorf("in[%d]: %w", i, err)
 		}
 
 		if ctrl == breakForStepLoopControl {
 			break
+		} else if ctrl == returnForStepLoopControl {
+			return ret, "end", nil
 		} else if ctrl == continueForStepLoopControl {
 			continue
 		}
@@ -1007,33 +1060,15 @@ func (s *forStep) executeInParallel(ev *expression.Evaluator) (any, StepName, er
 		}
 	}
 
-	symbolTable := ev.SymbolTable.ShallowClone()
-	inheritedVariables := &types.InternalInheritedVariables{
-		Shared: make(map[string]bool, len(symbolTable.Symbols)),
+	scope, err := newParallelScope(ev, s.parallel)
+	if err != nil {
+		return nil, "", err
 	}
-	for key := range symbolTable.KeysChan() {
-		inheritedVariables.Shared[key] = false
-	}
-	for i, shared := range s.parallel.shared {
-		ref, err := ev.ResolveReference(shared)
-		if err != nil {
-			return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
-		}
-
-		v, err := ref.ResolveVariable(symbolTable)
-		if err != nil {
-			return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
-		}
-
-		value := v.Get()
-		v.Set(&types.SharedVariable{Value: value})
-
-		root, _ := v.Paths()
-		inheritedVariables.Shared[root] = true
-	}
-	symbolTable.Symbols[types.InternalInheritedVariablesSymbol] = inheritedVariables
 
 	eg := errgroup.Group{}
+	if s.parallel.concurrencyLimit > 0 {
+		eg.SetLimit(s.parallel.concurrencyLimit)
+	}
 	for i, v := range in {
 		i := i
 		v := v
@@ -1042,21 +1077,20 @@ func (s *forStep) executeInParallel(ev *expression.Evaluator) (any, StepName, er
 				Symbols: map[string]any{
 					s.value: v,
 				},
-				Parent: symbolTable,
+				Parent: scope.symbolTable,
 			}
 
-			ctrl, err := s.workflow.execute(symbolTable)
+			_, _, err := s.workflow.execute(symbolTable)
 			if err != nil {
 				return fmt.Errorf("in[%d]: %w", i, err)
-			}
-			if ctrl == continueForStepLoopControl {
-				return nil
 			}
 
 			return nil
 		})
 	}
-	return nil, "", eg.Wait()
+	err = eg.Wait()
+	scope.writeback()
+	return nil, "", err
 }
 
 type forStepLoopControl int
@@ -1065,6 +1099,7 @@ const (
 	unknownForStepLoopControl forStepLoopControl = iota
 	continueForStepLoopControl
 	breakForStepLoopControl
+	returnForStepLoopControl
 )
 
 type forStepsWorkflow struct {
@@ -1072,31 +1107,33 @@ type forStepsWorkflow struct {
 	stepMap   map[StepName]Step
 }
 
-func (w *forStepsWorkflow) execute(symbolTable *types.SymbolTable) (forStepLoopControl, error) {
+func (w *forStepsWorkflow) execute(symbolTable *types.SymbolTable) (forStepLoopControl, any, error) {
 	ev := expression.Evaluator{SymbolTable: symbolTable}
 	step := w.entryStep
 	for step != nil {
-		_, nextStepName, err := step.Execute(&ev)
+		ret, nextStepName, err := step.Execute(&ev)
 		if err != nil {
-			return 0, fmt.Errorf("%s: %w", step.Name(), err)
+			return 0, nil, fmt.Errorf("%s: %w", step.Name(), err)
 		}
 		if nextStepName == "break" {
-			return breakForStepLoopControl, nil
+			return breakForStepLoopControl, nil, nil
 		} else if nextStepName == "continue" {
-			return continueForStepLoopControl, nil
+			return continueForStepLoopControl, nil, nil
+		} else if nextStepName == "end" {
+			return returnForStepLoopControl, ret, nil
 		} else if nextStepName == "" {
-			return 0, fmt.Errorf("%s: next step is not defined", step.Name())
+			return 0, nil, fmt.Errorf("%s: next step is not defined", step.Name())
 		}
 
 		nextStep, ok := w.stepMap[nextStepName]
 		if !ok {
-			return 0, fmt.Errorf("%s: not found", nextStepName)
+			return 0, nil, fmt.Errorf("%s: not found", nextStepName)
 		}
 
 		step = nextStep
 	}
 
-	return continueForStepLoopControl, nil
+	return continueForStepLoopControl, nil, nil
 }
 
 func newBranchesStep(def map[string]json.RawMessage, parallel *parallelPolicy) (*branchesStep, error) {
@@ -1146,6 +1183,9 @@ func newBranchesStep(def map[string]json.RawMessage, parallel *parallelPolicy) (
 				if err != nil {
 					return nil, fmt.Errorf("%s in branch %s: %w", stepDef.name, branchName, err)
 				}
+				if findReturnStep(wf.stepMap[stepDef.name]) {
+					return nil, fmt.Errorf("%s in branch %s: return is not allowed in a parallel branch", stepDef.name, branchName)
+				}
 
 				if wf.entryStep == nil {
 					wf.entryStep = wf.stepMap[stepDef.name]
@@ -1168,55 +1208,33 @@ type branchesStep struct {
 }
 
 func (s *branchesStep) Execute(ev *expression.Evaluator) (any, StepName, error) {
-	symbolTable := ev.SymbolTable
-	
-	// Only setup shared variables if they are specified
-	if len(s.parallel.shared) > 0 {
-		symbolTable = ev.SymbolTable.ShallowClone()
-		inheritedVariables := &types.InternalInheritedVariables{
-			Shared: make(map[string]bool, len(symbolTable.Symbols)),
-		}
-		for key := range symbolTable.KeysChan() {
-			inheritedVariables.Shared[key] = false
-		}
-		for i, shared := range s.parallel.shared {
-			ref, err := ev.ResolveReference(shared)
-			if err != nil {
-				return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
-			}
-
-			v, err := ref.ResolveVariable(symbolTable)
-			if err != nil {
-				return nil, "", fmt.Errorf("invalid shared[%d]: %w", i, err)
-			}
-
-			value := v.Get()
-			v.Set(&types.SharedVariable{Value: value})
-
-			root, _ := v.Paths()
-			inheritedVariables.Shared[root] = true
-		}
-		symbolTable.Symbols[types.InternalInheritedVariablesSymbol] = inheritedVariables
+	scope, err := newParallelScope(ev, s.parallel)
+	if err != nil {
+		return nil, "", err
 	}
 
 	eg := errgroup.Group{}
+	if s.parallel.concurrencyLimit > 0 {
+		eg.SetLimit(s.parallel.concurrencyLimit)
+	}
 	for _, branch := range s.branches {
 		branch := branch
 		eg.Go(func() error {
 			branchSymbolTable := &types.SymbolTable{
 				Symbols: map[string]any{},
-				Parent:  symbolTable,
+				Parent:  scope.symbolTable,
 			}
 
-			_, err := branch.execute(branchSymbolTable)
-			if err != nil {
+			if err := branch.execute(branchSymbolTable); err != nil {
 				return fmt.Errorf("branch %s: %w", branch.name, err)
 			}
 
 			return nil
 		})
 	}
-	return nil, "", eg.Wait()
+	err = eg.Wait()
+	scope.writeback()
+	return nil, "", err
 }
 
 type branchWorkflow struct {
@@ -1225,29 +1243,149 @@ type branchWorkflow struct {
 	stepMap   map[StepName]Step
 }
 
-func (w *branchWorkflow) execute(symbolTable *types.SymbolTable) (any, error) {
+func (w *branchWorkflow) execute(symbolTable *types.SymbolTable) error {
 	ev := expression.Evaluator{SymbolTable: symbolTable}
 	step := w.entryStep
 	for step != nil {
-		ret, nextStepName, err := step.Execute(&ev)
+		_, nextStepName, err := step.Execute(&ev)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", step.Name(), err)
+			return fmt.Errorf("%s: %w", step.Name(), err)
 		}
 		if nextStepName == "end" {
-			return ret, nil
+			return nil
 		} else if nextStepName == "" {
-			return nil, fmt.Errorf("%s: next step is not defined", step.Name())
+			return fmt.Errorf("%s: next step is not defined", step.Name())
 		}
 
 		nextStep, ok := w.stepMap[nextStepName]
 		if !ok {
-			return nil, fmt.Errorf("%s: not found", nextStepName)
+			return fmt.Errorf("%s: not found", nextStepName)
 		}
 
 		step = nextStep
 	}
 
-	return nil, nil
+	return nil
+}
+
+// parallelScope is the shared execution scope of a parallel step: a shallow
+// clone of the caller's symbol table in which every declared shared variable is
+// wrapped into a *types.SharedVariable, plus the inherited-variables set used
+// to reject assignments to non-shared variables inside the parallel step.
+type parallelScope struct {
+	symbolTable *types.SymbolTable
+	wrapped     []parallelSharedVariable
+	origin      *types.SymbolTable
+}
+
+type parallelSharedVariable struct {
+	name string
+	sv   *types.SharedVariable
+}
+
+func newParallelScope(ev *expression.Evaluator, policy *parallelPolicy) (*parallelScope, error) {
+	symbolTable := ev.SymbolTable.ShallowClone()
+	inheritedVariables := &types.InternalInheritedVariables{
+		Shared: make(map[string]bool, len(symbolTable.Symbols)),
+	}
+	for key := range symbolTable.KeysChan() {
+		inheritedVariables.Shared[key] = false
+	}
+
+	scope := &parallelScope{
+		symbolTable: symbolTable,
+		origin:      ev.SymbolTable,
+	}
+	for i, shared := range policy.shared {
+		name, ok := shared.SymbolName()
+		if !ok {
+			return nil, fmt.Errorf("invalid shared[%d]: must be a variable", i)
+		}
+
+		value, exists := symbolTable.Get(name)
+		if !exists {
+			return nil, fmt.Errorf("invalid shared[%d]: variable %q is not defined", i, name)
+		}
+
+		if _, alreadyShared := value.(*types.SharedVariable); alreadyShared {
+			// adopted from an outer parallel step: keep using its SharedVariable so
+			// both levels synchronize on the same lock, and leave the writeback to
+			// the outer scope, which is the single owner of the original variable
+			inheritedVariables.Shared[name] = true
+			continue
+		}
+
+		sv := &types.SharedVariable{Value: value}
+		// write to the clone's own map only: Set would walk the parent chain and
+		// install the wrapper into an ancestor table visible outside this step
+		symbolTable.Symbols[name] = sv
+		scope.wrapped = append(scope.wrapped, parallelSharedVariable{name: name, sv: sv})
+		inheritedVariables.Shared[name] = true
+	}
+	symbolTable.Symbols[types.InternalInheritedVariablesSymbol] = inheritedVariables
+
+	return scope, nil
+}
+
+// writeback publishes the final values of the shared variables wrapped by this
+// scope back to the original symbol table. It must be called after every
+// goroutine of the parallel step has finished, including when one of them
+// failed: with the continueAll exception policy the other branches run to
+// completion and their writes persist.
+func (s *parallelScope) writeback() {
+	for _, wrapped := range s.wrapped {
+		s.origin.Set(wrapped.name, wrapped.sv.Value)
+	}
+}
+
+// findReturnStep reports whether a return step is reachable anywhere inside the
+// compiled step, including nested switch/try/steps/for constructs.
+func findReturnStep(step AnonymousStep) bool {
+	switch s := step.(type) {
+	case *returnStep:
+		return true
+	case *namedStep:
+		return findReturnStep(s.step)
+	case *nextStep:
+		return findReturnStep(s.step)
+	case *anonymousStepsStep:
+		for _, inner := range s.stepMap {
+			if findReturnStep(inner) {
+				return true
+			}
+		}
+	case *switchStep:
+		for _, c := range s.conditions {
+			if findReturnStep(c.step) {
+				return true
+			}
+		}
+		if s.defaultStep != nil {
+			return findReturnStep(s.defaultStep)
+		}
+	case *tryStep:
+		if findReturnStep(s.realStep) {
+			return true
+		}
+		if s.exceptStep != nil {
+			return findReturnStep(s.exceptStep.steps)
+		}
+	case *forStep:
+		for _, inner := range s.workflow.stepMap {
+			if findReturnStep(inner) {
+				return true
+			}
+		}
+	case *branchesStep:
+		for _, branch := range s.branches {
+			for _, inner := range branch.stepMap {
+				if findReturnStep(inner) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
@@ -1263,6 +1401,16 @@ func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
 		}
 		if exceptionPolicy != "continueAll" {
 			return nil, fmt.Errorf("parallel: unsupported exception_policy: %s", exceptionPolicyDef)
+		}
+	}
+
+	concurrencyLimit := 0
+	if concurrencyLimitDef, ok := parallelDef["concurrency_limit"]; ok {
+		if err := json.Unmarshal(concurrencyLimitDef, &concurrencyLimit); err != nil {
+			return nil, fmt.Errorf("parallel: invalid concurrency_limit: %w", err)
+		}
+		if concurrencyLimit < 1 {
+			return nil, fmt.Errorf("parallel: invalid concurrency_limit: must be a positive integer")
 		}
 	}
 
@@ -1286,8 +1434,9 @@ func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
 	}
 
 	policy := &parallelPolicy{
-		exceptionPolicy: exceptionPolicy,
-		shared:          shared,
+		exceptionPolicy:  exceptionPolicy,
+		shared:           shared,
+		concurrencyLimit: concurrencyLimit,
 	}
 
 	var step AnonymousStep
@@ -1313,6 +1462,7 @@ func newParallelStep(def anonymousStepDef) (AnonymousStep, error) {
 }
 
 type parallelPolicy struct {
-	exceptionPolicy string
-	shared          []*expression.Expr
+	exceptionPolicy  string
+	shared           []*expression.Expr
+	concurrencyLimit int
 }
